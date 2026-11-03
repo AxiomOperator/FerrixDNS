@@ -183,7 +183,7 @@ Crate dependencies flow inward: protocol/runtime adapters depend on domain inter
 3. Resolve client identity from source address (potentially authenticated listener context). Do **not** trust arbitrary EDNS Client Subnet to assign security group. Define IPv6 and NAT limitations.
 4. Select site/listener context, the client's applicable policy scopes (client, groups, site, global) and split-horizon routing context.
 5. Evaluate policy against normalized IDNA/lowercase FQDN using immutable compiled snapshot. Names inside a managed local zone are evaluated against rules only, not subscribed lists.
-6. If blocked, construct configured response (default configurable NXDOMAIN or zero-address; allow policy-specific behavior and document DNSSEC implications). If allowed and inside a managed local zone, answer from the local-zone record set. Otherwise check the upstream cache.
+6. If blocked, construct configured response (default configurable NXDOMAIN or zero-address; allow policy-specific behavior and document DNSSEC implications). Zero-address mode answers A with `0.0.0.0` and AAAA with `::`; other query types get an empty NOERROR answer. Negative block answers carry a synthetic SOA, and all block answers use a configurable TTL (default 60 seconds, maximum 86400). EDNS clients also receive Extended DNS Error 15 (Blocked, RFC 8914). If allowed and inside a managed local zone, answer from the local-zone record set. Otherwise check the upstream cache.
 7. On a cache miss, select upstream pool by suffix/route, send query with bounded retries/deadlines; preserve request semantics, DNSSEC/EDNS behaviors, fallback to TCP after truncated UDP response.
 8. Validate response/transaction provenance and cache only permitted records with TTL bounds and negative response handling.
 9. For every cache hit or upstream answer, evaluate each CNAME target in the answer against the active snapshot. If any target is blocked, replace the answer with the configured block response. Chains deeper than 16 names return SERVFAIL. The cached upstream answer is left in place because it records no policy decision.
@@ -1030,7 +1030,7 @@ These items are not yet resolved in this specification.
 - Choose the snapshot format and compilation isolation (subprocess or mmap, separate runtime) to keep compilation from causing an OOM on 1 GB devices.
 - Define DNS behavior at boot when no valid snapshot exists: fail open, fail closed or delay binding.
 - Run a Phase 0 Hickory spike covering custom cache and upstream fit with DNSSEC validation, plus throughput. `hickory-server` is pre-1.0.
-- Define TTL for blocked answers, zero-address responses for non-address query types, RFC 6303/6761 name handling and Extended DNS Errors.
+- Define RFC 6303/6761 name handling.
 - Review whether a broad suffix or regex allow should outrank a narrower deny in the same scope, as the tier order currently specifies.
 
 **Privacy and telemetry**

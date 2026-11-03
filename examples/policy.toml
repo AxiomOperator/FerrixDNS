@@ -1,0 +1,63 @@
+# An example FerrixDNS policy. Check a file with: fx policy validate examples/policy.toml
+schema_version = 1
+
+# This node's site, which selects rules scoped to { kind = "site" }. Optional.
+site = "home"
+
+[block]
+# "nxdomain", or "zero_address" to answer A with 0.0.0.0 and AAAA with ::.
+response = "nxdomain"
+# How long clients may cache a block. Longer values delay exceptions taking effect.
+ttl_seconds = 60
+
+# Known clients are identified by source address. The most specific match wins.
+[[clients]]
+id = "kids-tablet"
+addresses = ["192.168.1.50"]
+groups = ["kids"]
+
+[[clients]]
+id = "guest-wifi"
+addresses = ["192.168.50.0/24"]
+groups = ["guests"]
+
+# Precedence is described in docs/adr/ADR-003-policy-precedence.md.
+# The narrowest scope with a match decides: client, then group, then site, then global.
+[[rules]]
+id = "block-trackers"
+action = "deny"
+match = "suffix" # "exact", "suffix" (the name and its subdomains) or "regex"
+pattern = "tracker.example"
+reason = "Tracking domain"
+
+[[rules]]
+id = "homework-exception"
+action = "allow"
+match = "exact"
+pattern = "learn.tracker.example"
+scope = { kind = "client", id = "kids-tablet" }
+reason = "Needed for school"
+expires_at = "2030-01-01T00:00:00Z" # Stops applying at this time, with no restart needed.
+
+# An emergency deny beats everything, at any scope.
+[[rules]]
+id = "incident-response"
+action = "deny"
+match = "suffix"
+pattern = "malware.example"
+emergency = true
+reason = "Active incident"
+
+[[rules]]
+id = "numbered-ad-servers"
+action = "deny"
+match = "regex"
+pattern = '^ad[0-9]+\.'
+
+# Lists written directly in this file. With no groups, a list applies at global scope.
+[[lists]]
+id = "kids-blocklist"
+action = "deny"
+groups = ["kids"]
+domains = ["games.example"]
+suffixes = ["social.example"]

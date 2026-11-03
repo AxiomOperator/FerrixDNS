@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use dns_runtime::{DnsServer, RuntimeConfig};
+use dns_runtime::{DnsServer, PolicyHandle, RuntimeConfig, empty_policy};
 use dns_upstreams::PoolConfig;
 use hickory_proto::op::{Edns, Message, MessageType, OpCode, Query, ResponseCode};
 use hickory_proto::rr::rdata::svcb::SVCB;
@@ -67,9 +67,10 @@ impl Fixture {
     }
 
     pub async fn with_mode(mode: Mode) -> Self {
-        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let (socket, listener) = dns_runtime::bind_udp_and_tcp("127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
         let addr = socket.local_addr().unwrap();
-        let listener = TcpListener::bind(addr).await.unwrap();
         let fixture = Self {
             addr,
             mode,
@@ -315,6 +316,7 @@ pub struct ServerOptions {
     pub attempt_timeout: Duration,
     pub total_timeout: Duration,
     pub rounds: u32,
+    pub policy: PolicyHandle,
 }
 
 impl ServerOptions {
@@ -326,6 +328,7 @@ impl ServerOptions {
             attempt_timeout: Duration::from_millis(200),
             total_timeout: Duration::from_millis(1000),
             rounds: 1,
+            policy: empty_policy(),
         }
     }
 }
@@ -342,6 +345,7 @@ pub async fn start_server(options: ServerOptions) -> SocketAddr {
             rounds: options.rounds,
         },
         max_concurrent_requests: options.max_concurrent_requests,
+        policy: options.policy,
     })
     .await
     .unwrap();

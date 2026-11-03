@@ -21,6 +21,23 @@ If rules lived only in tables and revisions only in JSON documents, a rollback m
 rules. Rule edits and temporary exceptions also need to take effect quickly, which rules out
 recompiling a list of millions of domains each time.
 
+## Current implementation
+
+DNS-005 implements the snapshot and durability parts, with a policy file standing in for the future
+API and `config.db`:
+
+- A revision is the SHA-256 of the policy file's bytes. Each valid file is stored in
+  `<state-dir>/policy/`, with write, fsync and atomic rename, and the last three are kept.
+- Revisions store the **source document, not compiled indexes**, and are recompiled at boot. The
+  compiled format is still open (spec section 13), and boot time on large lists needs measuring.
+- If the file is missing or invalid at boot, the newest stored revision that verifies and compiles
+  is used. If `--policy` was given and nothing usable exists, `fx` refuses to start. This is a
+  provisional answer to the boot-behavior question in spec section 13.
+- A SIGHUP reload that fails leaves the active policy unchanged, and rule edits reuse the compiled
+  list layer when lists are unchanged.
+- If a valid policy can't be persisted, for example on a full disk, it still activates and an error
+  is logged, because DNS must keep working (FR-010).
+
 ## Consequences
 
 - A success response means the change is active on that node.

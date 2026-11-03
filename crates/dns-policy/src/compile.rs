@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use regex::{RegexSet, RegexSetBuilder};
+use serde::Deserialize;
 use thiserror::Error;
 
 use crate::name::{DomainName, NameError};
@@ -12,14 +13,16 @@ pub const MAX_REGEX_PATTERN_LEN: usize = 1024;
 const REGEX_SIZE_LIMIT: usize = 1 << 20;
 
 /// What a rule or list does when it matches.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
 pub enum RuleAction {
     Allow,
     Deny,
 }
 
 /// How a rule's pattern is compared with a name.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
 pub enum MatchType {
     Exact,
     /// Matches the name itself and its subdomains, on label boundaries.
@@ -28,7 +31,8 @@ pub enum MatchType {
 }
 
 /// Who a rule applies to.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", content = "id", rename_all = "lowercase")]
 pub enum Scope {
     Client(String),
     Group(String),

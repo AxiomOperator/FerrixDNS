@@ -1,15 +1,19 @@
 [package]
 name = "dns-policy"
-description = "Immutable DNS policy matcher, compilation and precedence."
+description = "Immutable DNS policy documents, matcher, compilation and precedence."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+humantime.workspace = true
 idna.workspace = true
+ipnet.workspace = true
 regex.workspace = true
+serde.workspace = true
 thiserror.workspace = true
+toml.workspace = true
 
 [lints]
 workspace = true

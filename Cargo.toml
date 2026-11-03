@@ -4,6 +4,7 @@ members = [
     "crates/dns-policy",
     "crates/dns-upstreams",
     "crates/dns-runtime",
+    "crates/dns-storage",
     "crates/node-bin",
     "tests/integration",
 ]
@@ -18,17 +19,24 @@ publish = false
 dns-policy = { path = "crates/dns-policy" }
 dns-upstreams = { path = "crates/dns-upstreams" }
 dns-runtime = { path = "crates/dns-runtime" }
+dns-storage = { path = "crates/dns-storage" }
 
 anyhow = "1"
+arc-swap = "1.9"
 async-trait = "0.1"
 clap = { version = "4.6", features = ["derive"] }
 hickory-proto = "0.26.3"
 hickory-server = "0.26.3"
+humantime = "2.4"
 idna = "1.1"
 ipnet = "2"
 rand = "0.9"
 regex = "1.13"
+serde = { version = "1", features = ["derive"] }
+sha2 = "0.11"
+tempfile = "3.27"
 thiserror = "2"
+toml = "1"
 tokio = { version = "1.54", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
