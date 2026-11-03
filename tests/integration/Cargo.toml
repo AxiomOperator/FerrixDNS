@@ -1,0 +1,15 @@
+[package]
+name = "integration"
+description = "End-to-end DNS tests against a scripted upstream fixture."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+dns-runtime.workspace = true
+dns-upstreams.workspace = true
+hickory-proto.workspace = true
+ipnet.workspace = true
+rand.workspace = true
+tokio.workspace = true
