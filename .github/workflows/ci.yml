@@ -13,9 +13,9 @@ env:
 
 jobs:
   rust:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install the pinned toolchain
         run: rustup show active-toolchain || rustup toolchain install
       - run: cargo fmt --all --check
@@ -25,7 +25,7 @@ jobs:
         run: scripts/check-layering.sh
 
   dependencies:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: EmbarkStudios/cargo-deny-action@v2
