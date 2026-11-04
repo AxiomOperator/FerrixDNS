@@ -6,6 +6,7 @@
 mod compile;
 mod document;
 mod evaluate;
+mod local;
 mod name;
 
 pub use compile::{
@@ -13,11 +14,16 @@ pub use compile::{
     PolicySnapshot, Rule, RuleAction, RuleOverlay, Scope,
 };
 pub use document::{
-    BlockConfig, BlockResponse, ClientDef, CompiledPolicy, Identities, Identity, ListDef,
-    MAX_BLOCK_TTL_SECONDS, PolicyDocument, PolicyError, RuleDef, SCHEMA_VERSION, Verdict,
+    ArtifactLoader, BlockConfig, BlockResponse, ClientDef, CompiledPolicy, GroupDef, Identities,
+    Identity, ListDef, ListFormat, MAX_BLOCK_TTL_SECONDS, PolicyDocument, PolicyError,
+    QueryLogMode, RuleDef, SCHEMA_VERSION, TelemetryConfig, Verdict,
 };
 pub use evaluate::{
     Action, ChainOutcome, ClientContext, Decision, DecisionSource, MAX_CNAME_CHAIN, NameContext,
     ScopeLevel, Tier,
+};
+pub use local::{
+    LOCAL_NEGATIVE_TTL_SECONDS, LocalAnswer, LocalData, LocalQuery, LocalRecord, LocalRecordDef,
+    LocalRecordType, LocalZoneDef, LocalZones, reverse_name,
 };
 pub use name::{DomainName, NameError};

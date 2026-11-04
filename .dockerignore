@@ -1,0 +1,7 @@
+target
+.git
+.ferrix-state
+frontend/node_modules
+frontend/dist
+frontend/test-results
+frontend/.tanstack

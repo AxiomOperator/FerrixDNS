@@ -1,0 +1,16 @@
+[package]
+name = "performance"
+description = "DNS load generator and scripted upstream for performance tests."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "dnsload"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+rand.workspace = true
+tokio.workspace = true

@@ -1,0 +1,27 @@
+# Host networking is what lets the node see each device's real address. With published ports,
+# containers usually see every query coming from one gateway address, so per-client rules and
+# client statistics can't work.
+services:
+  ferrixdns:
+    image: ferrixdns
+    build:
+      context: ../..
+      dockerfile: packaging/docker/Dockerfile
+    restart: unless-stopped
+    network_mode: host
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    security_opt: ["no-new-privileges:true"]
+    volumes:
+      - ferrixdns-data:/data
+    environment:
+      # Use this machine's LAN address.
+      FX_LISTEN: 192.168.1.10:53
+      # Names and addresses people will use to reach the dashboard.
+      FX_WEB_HOST: 192.168.1.10,dns.home.arpa
+      FX_UPSTREAM: tls://cloudflare-dns.com@1.1.1.1,tls://dns.quad9.net@9.9.9.9
+      FX_HEALTH_ADDRESS: 192.168.1.10:53
+
+volumes:
+  ferrixdns-data:

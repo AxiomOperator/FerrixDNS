@@ -4,57 +4,97 @@ A self-hostable, Rust-native DNS filtering and management platform. The design i
 [`docs/Rust_DNS_Platform_Engineering_Specification.md`](docs/Rust_DNS_Platform_Engineering_Specification.md),
 and decisions are recorded in [`docs/adr/`](docs/adr/).
 
-**Status:** early development, not ready for production. `fx serve` filters and forwards DNS over
-UDP and TCP using a policy file. There's no cache, blocklist downloads, query log, API or dashboard
-yet.
+**Status:** early development, not yet production-tested. A standalone node filters and caches DNS,
+serves local zones, supports encrypted upstreams and DNSSEC validation, and has a web dashboard with
+backup and restore. The central controller for managing many nodes isn't built yet.
 
-## Try it
+- [Installing and running a node](docs/operations/install.md): packages, containers, TLS and upgrades
+- [Backup and restore](docs/operations/backup.md)
+- [Performance measurements](docs/performance.md)
+
+## Try the dashboard
+
+You need Rust, Node.js and pnpm. This builds everything and starts a node serving DNS and the
+dashboard:
 
 ```sh
-cargo run -p node-bin -- serve --listen 127.0.0.1:5300 --upstream 1.1.1.1:53 \
-    --policy examples/policy.toml --state-dir /tmp/ferrix-state
+scripts/start.sh
 ```
 
-Then, in a second terminal because `fx serve` stays in the foreground:
+`scripts/start.sh --help` lists its settings, such as the ports and upstream server.
 
-```sh
-dig @127.0.0.1 -p 5300 example.com          # forwarded
-dig @127.0.0.1 -p 5300 a.tracker.example    # blocked by the example policy: NXDOMAIN
-```
+1. Find the `setup_token` in the node's log. It's printed only until an administrator exists.
+2. Open <http://127.0.0.1:8080> and create your administrator with that token.
+3. Send it some DNS from a second terminal, and watch it appear under **Query Explorer**:
+
+   ```sh
+   dig @127.0.0.1 -p 5300 example.com
+   ```
+
+4. To see blocking, add a rule under **Rules**, or add a list under **Sources**, such as
+   `https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts` in hosts file format.
 
 Avoid port 5353, which is reserved for mDNS and is usually taken by Avahi or systemd-resolved. Port
-53 needs extra privileges.
+53 needs extra privileges. Only loopback and private source addresses are served by default. Use
+`--allow <CIDR>` to replace that list.
 
-Only loopback and private source addresses are served by default. Use `--allow <CIDR>` to replace
-that list.
+The dashboard stays on loopback by default. The [install guide](docs/operations/install.md) covers
+reaching it from other devices over TLS.
 
-## Policy
-
-[`examples/policy.toml`](examples/policy.toml) shows every option.
+Lost your password? This sets a new one from standard input and ends all sessions:
 
 ```sh
+fx admin reset-password --state-dir .ferrix-state --username admin
+```
+
+## Managing policy
+
+With `--state-dir` and no `--policy`, you manage policy in the dashboard. Each change is validated
+and stored before it applies, and **System** can restore any of the last three revisions.
+
+You can also manage policy in a file. The dashboard is then read-only for policy, so the two can't
+disagree. [`examples/policy.toml`](examples/policy.toml) shows the options.
+
+```sh
+fx serve --listen 127.0.0.1:5300 --upstream 1.1.1.1:53 --policy my-policy.toml --state-dir .ferrix-state
 fx policy validate my-policy.toml    # check a file without applying it
 kill -HUP "$(pidof fx)"              # apply changes without restarting
 ```
 
 - A bad file never replaces the active policy. A failed reload is logged and changes nothing.
-- With `--state-dir`, each valid policy is stored durably. If the file is later missing or invalid,
-  the node restarts on the newest stored policy that still works. The last three are kept.
+- If the file is later missing or invalid, the node restarts on the newest stored policy that works.
 - If `--policy` is set but invalid and nothing is stored, `fx` refuses to start instead of serving
   unfiltered DNS.
-- Rules with `expires_at` stop applying at that time, with no restart or reload.
 
-## Checks
+## Query data and privacy
+
+By default the node keeps each query, including which device asked, for 7 days or 2 GiB, whichever
+comes first. It stays on the node. You can reduce this under **Settings**.
+
+## Development
+
+```sh
+scripts/start.sh --dev               # the node, plus the UI with hot reload on port 5173
+pnpm --dir frontend gen:api          # regenerate UI types after changing the API
+```
+
+Checks, which CI also runs:
 
 ```sh
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 scripts/check-layering.sh
+pnpm --dir frontend typecheck
+pnpm --dir frontend build && cargo build -p node-bin && pnpm --dir frontend test:e2e
 ```
 
-To measure the policy engine with a large list:
+The browser tests drive the real `fx` binary with real DNS queries, and run accessibility checks on
+each page. They need Playwright's browser: `pnpm --dir frontend exec playwright install chromium`.
+
+To measure throughput and latency, or the policy engine with a large list:
 
 ```sh
+scripts/load_test.py
 cargo run --release -p dns-policy --example bench_policy -- 1000000
 ```

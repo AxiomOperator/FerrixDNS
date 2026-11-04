@@ -30,7 +30,11 @@ and a resolver with its own cache gets in the way.
 - We own transaction matching, TCP fallback and timeouts, and must test them directly.
 - Hickory is pre-1.0, so its API may change between releases. Keep the dependency in `dns-runtime`
   and `dns-upstreams`, and out of `dns-policy`.
-- **Still open:** DNSSEC validation. Without `hickory-resolver`, local validation must be built from
-  `hickory-proto`'s DNSSEC support, and that fit hasn't been tested. Until then FerrixDNS clears the
-  AD bit on responses and never claims validation.
-- **Still open:** measuring throughput against the 10,000 QPS target.
+- DNSSEC validation uses `hickory-net`'s `DnssecDnsHandle`, which is generic over a handle, on top of
+  our pool and cache. Upstreams are asked with CD set, so the node validates independently. AD is only
+  ever this node's own conclusion, and is cleared when validation is off.
+- Encrypted upstreams use our own DoT and DoH transports, so failover, statistics and the cache work the
+  same for every upstream type.
+- Throughput was measured well above the 10,000 QPS target. See `docs/performance.md`.
+- The UDP loop's unbounded task spawning held up in flood testing, because rejected and blocked requests
+  finish quickly and upstream work is capped by the in-flight limit.

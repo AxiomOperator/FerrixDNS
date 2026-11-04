@@ -328,3 +328,113 @@ async fn the_root_name_is_forwarded() {
     ask(server, ".", RecordType::NS).await;
     assert_eq!(fixture.udp_queries(), 1);
 }
+
+const LOCAL_POLICY: &str = r#"
+schema_version = 1
+[[local_zones]]
+name = "home.arpa"
+[[local_records]]
+id = "1"
+name = "nas.home.arpa"
+type = "a"
+value = "192.168.1.10"
+[[local_records]]
+id = "2"
+name = "files.home.arpa"
+type = "cname"
+value = "nas.home.arpa"
+[[local_records]]
+id = "3"
+name = "secret.home.arpa"
+type = "a"
+value = "192.168.1.11"
+[[rules]]
+id = "r1"
+action = "deny"
+match = "exact"
+pattern = "secret.home.arpa"
+[[lists]]
+id = "l1"
+action = "deny"
+domains = ["nas.home.arpa"]
+"#;
+
+#[tokio::test]
+async fn local_zones_answer_authoritatively_without_going_upstream() {
+    let fixture = Fixture::start().await;
+    let server = server_with_policy(&fixture, handle(LOCAL_POLICY)).await;
+
+    // A blocklist entry doesn't block a name the operator created.
+    let found = ask(server, "nas.home.arpa.", RecordType::A).await;
+    assert_eq!(found.metadata.response_code, ResponseCode::NoError);
+    assert!(found.metadata.authoritative);
+    assert!(found.metadata.recursion_available);
+    assert_eq!(found.answers.len(), 1);
+
+    let chased = ask(server, "files.home.arpa.", RecordType::A).await;
+    assert_eq!(chased.answers.len(), 2);
+
+    let no_type = ask(server, "nas.home.arpa.", RecordType::MX).await;
+    assert_eq!(no_type.metadata.response_code, ResponseCode::NoError);
+    assert!(no_type.answers.is_empty());
+    assert_eq!(no_type.authorities[0].record_type(), RecordType::SOA);
+
+    let no_name = ask(server, "ghost.home.arpa.", RecordType::A).await;
+    assert_eq!(no_name.metadata.response_code, ResponseCode::NXDomain);
+    assert!(no_name.metadata.authoritative);
+    assert_eq!(no_name.authorities[0].record_type(), RecordType::SOA);
+
+    let apex = ask(server, "home.arpa.", RecordType::SOA).await;
+    assert_eq!(apex.answers[0].record_type(), RecordType::SOA);
+
+    let ptr = ask(server, "10.1.168.192.in-addr.arpa.", RecordType::PTR).await;
+    assert_eq!(ptr.answers[0].record_type(), RecordType::PTR);
+
+    assert_eq!(fixture.udp_queries() + fixture.tcp_queries(), 0);
+}
+
+#[tokio::test]
+async fn rule_denies_still_apply_to_local_zones() {
+    let fixture = Fixture::start().await;
+    let server = server_with_policy(&fixture, handle(LOCAL_POLICY)).await;
+    let blocked = ask(server, "secret.home.arpa.", RecordType::A).await;
+    assert_eq!(blocked.metadata.response_code, ResponseCode::NXDomain);
+    assert!(blocked.answers.is_empty());
+    assert!(
+        !blocked.metadata.authoritative,
+        "this came from the block path"
+    );
+}
+
+#[tokio::test]
+async fn reserved_names_and_private_reverse_lookups_never_go_upstream() {
+    let fixture = Fixture::start().await;
+    let server = server_with_policy(&fixture, handle("schema_version = 1")).await;
+
+    let localhost = ask(server, "localhost.", RecordType::A).await;
+    let RData::A(address) = &localhost.answers[0].data else {
+        panic!("expected an A record");
+    };
+    assert!(address.0.is_loopback());
+
+    for (name, qtype) in [
+        ("x.invalid.", RecordType::A),
+        ("site.onion.", RecordType::A),
+        ("printer.local.", RecordType::A),
+        ("router.home.arpa.", RecordType::A),
+        ("1.1.168.192.in-addr.arpa.", RecordType::PTR),
+        ("1.0.0.10.in-addr.arpa.", RecordType::PTR),
+    ] {
+        let response = ask(server, name, qtype).await;
+        assert_eq!(
+            response.metadata.response_code,
+            ResponseCode::NXDomain,
+            "{name}"
+        );
+    }
+    assert_eq!(
+        fixture.udp_queries() + fixture.tcp_queries(),
+        0,
+        "these must not leak"
+    );
+}

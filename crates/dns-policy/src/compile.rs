@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use regex::{RegexSet, RegexSetBuilder};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::name::{DomainName, NameError};
@@ -13,7 +13,7 @@ pub const MAX_REGEX_PATTERN_LEN: usize = 1024;
 const REGEX_SIZE_LIMIT: usize = 1 << 20;
 
 /// What a rule or list does when it matches.
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum RuleAction {
     Allow,
@@ -21,7 +21,7 @@ pub enum RuleAction {
 }
 
 /// How a rule's pattern is compared with a name.
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum MatchType {
     Exact,
@@ -31,7 +31,7 @@ pub enum MatchType {
 }
 
 /// Who a rule applies to.
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(tag = "kind", content = "id", rename_all = "lowercase")]
 pub enum Scope {
     Client(String),
@@ -68,6 +68,8 @@ pub struct ListSource {
     /// Groups the list applies to. A list with no groups applies at global scope.
     pub groups: Vec<String>,
     pub entries: Vec<ListEntry>,
+    /// Downloaded content in the normalized artifact format, which compiles without copying.
+    pub artifact: Option<Vec<u8>>,
 }
 
 /// Why rules could not be compiled.
@@ -88,6 +90,10 @@ pub enum CompileError {
     RegexSetTooLarge(regex::Error),
     #[error("rule {rule_id}: only deny rules can be emergency rules")]
     EmergencyAllow { rule_id: String },
+    #[error("cannot index a list: {0}")]
+    ListIndex(String),
+    #[error("list {list_id}: its downloaded content is malformed")]
+    ListArtifact { list_id: String },
 }
 
 /// One tier's regexes. `ids` is sorted and parallel to the patterns in `set`.
@@ -302,10 +308,13 @@ impl RuleOverlay {
 }
 
 /// Subscribed entries for one action, within one scope. Values index into [`ListLayer::ids`].
+///
+/// These use finite state transducers, which share common prefixes and suffixes. Domain lists
+/// compress far better this way than as hash maps of strings, and lookups read no other memory.
 #[derive(Debug, Default)]
 pub(crate) struct ListMatchers {
-    pub(crate) exact: HashMap<Box<str>, u32>,
-    pub(crate) suffix: HashMap<Box<str>, u32>,
+    pub(crate) exact: fst::Map<Vec<u8>>,
+    pub(crate) suffix: fst::Map<Vec<u8>>,
 }
 
 #[derive(Debug, Default)]
@@ -323,56 +332,134 @@ pub struct ListLayer {
     pub(crate) global: ListIndex,
 }
 
-fn insert_lowest_index(map: &mut HashMap<Box<str>, u32>, key: &str, index: u32) {
-    match map.get_mut(key) {
-        Some(existing) => *existing = (*existing).min(index),
-        None => {
-            map.insert(key.into(), index);
+/// Names waiting to be indexed. These borrow from their source, to keep compiling cheap.
+#[derive(Default)]
+struct PendingList<'a> {
+    allow_exact: Vec<(&'a [u8], u32)>,
+    allow_suffix: Vec<(&'a [u8], u32)>,
+    deny_exact: Vec<(&'a [u8], u32)>,
+    deny_suffix: Vec<(&'a [u8], u32)>,
+}
+
+impl<'a> PendingList<'a> {
+    fn add(&mut self, action: RuleAction, is_suffix: bool, name: &'a [u8], position: u32) {
+        // A list must never be able to match every name through the root.
+        if name.is_empty() {
+            return;
         }
+        let bucket = match (action, is_suffix) {
+            (RuleAction::Allow, false) => &mut self.allow_exact,
+            (RuleAction::Allow, true) => &mut self.allow_suffix,
+            (RuleAction::Deny, false) => &mut self.deny_exact,
+            (RuleAction::Deny, true) => &mut self.deny_suffix,
+        };
+        bucket.push((name, position));
+    }
+
+    fn finish(self) -> Result<ListIndex, CompileError> {
+        Ok(ListIndex {
+            allow: ListMatchers {
+                exact: build_map(self.allow_exact)?,
+                suffix: build_map(self.allow_suffix)?,
+            },
+            deny: ListMatchers {
+                exact: build_map(self.deny_exact)?,
+                suffix: build_map(self.deny_suffix)?,
+            },
+        })
     }
 }
 
-fn add_entries(index: &mut ListIndex, list: &ListSource, position: u32) {
-    let matchers = match list.action {
-        RuleAction::Allow => &mut index.allow,
-        RuleAction::Deny => &mut index.deny,
-    };
-    for entry in &list.entries {
-        match entry {
-            ListEntry::Exact(name) if !name.is_root() => {
-                insert_lowest_index(&mut matchers.exact, name.as_str(), position);
-            }
-            ListEntry::Suffix(name) if !name.is_root() => {
-                insert_lowest_index(&mut matchers.suffix, name.as_str(), position);
-            }
-            // A list must never be able to match every name through the root.
-            ListEntry::Exact(_) | ListEntry::Suffix(_) => {}
-        }
+/// Builds an index, keeping the lowest list position for a name found in several lists.
+fn build_map(mut entries: Vec<(&[u8], u32)>) -> Result<fst::Map<Vec<u8>>, CompileError> {
+    entries.sort_unstable();
+    entries.dedup_by_key(|entry| entry.0);
+    let mut builder = fst::MapBuilder::memory();
+    for (name, position) in entries {
+        builder
+            .insert(name, u64::from(position))
+            .map_err(|error| CompileError::ListIndex(error.to_string()))?;
     }
+    // Releases the builder's spare capacity, which would otherwise stay allocated.
+    let mut bytes = builder
+        .into_inner()
+        .map_err(|error| CompileError::ListIndex(error.to_string()))?;
+    bytes.shrink_to_fit();
+    fst::Map::new(bytes).map_err(|error| CompileError::ListIndex(error.to_string()))
+}
+
+/// Reads entries from a normalized list artifact: `e name` and `s name` lines.
+fn add_artifact<'a>(
+    pending: &mut PendingList<'a>,
+    list: &'a ListSource,
+    artifact: &'a [u8],
+    position: u32,
+) -> Result<(), CompileError> {
+    for line in artifact.split(|byte| *byte == b'\n') {
+        if line.is_empty() {
+            continue;
+        }
+        let (is_suffix, name) = match line {
+            [b'e', b' ', name @ ..] => (false, name),
+            [b's', b' ', name @ ..] => (true, name),
+            _ => {
+                return Err(CompileError::ListArtifact {
+                    list_id: list.id.clone(),
+                });
+            }
+        };
+        pending.add(list.action, is_suffix, name, position);
+    }
+    Ok(())
 }
 
 impl ListLayer {
     /// Compiles lists into per-scope indexes. Root entries are ignored.
-    pub fn compile(lists: &[ListSource]) -> Self {
+    pub fn compile(lists: &[ListSource]) -> Result<Self, CompileError> {
         let mut sorted: Vec<&ListSource> = lists.iter().collect();
         sorted.sort_by(|left, right| left.id.cmp(&right.id));
 
-        let mut layer = Self {
-            ids: sorted.iter().map(|list| list.id.as_str().into()).collect(),
-            ..Self::default()
-        };
-
-        for (position, list) in (0_u32..).zip(sorted) {
+        let mut global = PendingList::default();
+        let mut groups: HashMap<&str, PendingList<'_>> = HashMap::new();
+        for (position, list) in (0_u32..).zip(sorted.iter().copied()) {
             if list.groups.is_empty() {
-                add_entries(&mut layer.global, list, position);
+                add_source(&mut global, list, position)?;
             }
             for group in &list.groups {
-                let index = layer.groups.entry(group.as_str().into()).or_default();
-                add_entries(index, list, position);
+                add_source(groups.entry(group).or_default(), list, position)?;
             }
         }
-        layer
+
+        Ok(Self {
+            ids: sorted.iter().map(|list| list.id.as_str().into()).collect(),
+            groups: groups
+                .into_iter()
+                .map(|(group, pending)| Ok((group.into(), pending.finish()?)))
+                .collect::<Result<_, CompileError>>()?,
+            global: global.finish()?,
+        })
     }
+}
+
+fn add_source<'a>(
+    pending: &mut PendingList<'a>,
+    list: &'a ListSource,
+    position: u32,
+) -> Result<(), CompileError> {
+    for entry in &list.entries {
+        match entry {
+            ListEntry::Exact(name) => {
+                pending.add(list.action, false, name.as_str().as_bytes(), position);
+            }
+            ListEntry::Suffix(name) => {
+                pending.add(list.action, true, name.as_str().as_bytes(), position);
+            }
+        }
+    }
+    if let Some(artifact) = &list.artifact {
+        add_artifact(pending, list, artifact, position)?;
+    }
+    Ok(())
 }
 
 /// An immutable policy revision that can be evaluated without locks or I/O.

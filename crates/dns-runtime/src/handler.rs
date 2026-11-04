@@ -1,14 +1,22 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
+use std::time::{Instant, SystemTime};
 
-use dns_policy::{BlockConfig, BlockResponse, DomainName, Verdict};
-use dns_upstreams::{EdnsRequest, MAX_UDP_PAYLOAD, UpstreamPool, UpstreamRequest};
+use dns_cache::{CacheKey, DnsCache};
+use dns_policy::{
+    BlockConfig, BlockResponse, Decision, DecisionSource, DomainName, LOCAL_NEGATIVE_TTL_SECONDS,
+    LocalAnswer, LocalData, LocalQuery, LocalRecord, Verdict,
+};
+use dns_telemetry::{Outcome, QueryEvent, Telemetry};
+use dns_upstreams::{
+    DnssecStatus, DnssecValidator, EdnsRequest, MAX_UDP_PAYLOAD, UpstreamPool, UpstreamRequest,
+};
 use hickory_server::net::runtime::Time;
 use hickory_server::proto::op::{
     Edns, Header, HeaderCounts, LowerQuery, Message, MessageType, Metadata, OpCode, ResponseCode,
 };
 use hickory_server::proto::rr::rdata::opt::EdnsOption;
-use hickory_server::proto::rr::rdata::{A, AAAA, CNAME, SOA};
+use hickory_server::proto::rr::rdata::{A, AAAA, CNAME, NS, PTR, SOA};
 use hickory_server::proto::rr::{DNSClass, Name, RData, Record, RecordType};
 use hickory_server::server::{Request, RequestHandler, ResponseHandler, ResponseInfo};
 use hickory_server::zone_handler::MessageResponseBuilder;
@@ -21,12 +29,74 @@ use crate::policy::PolicyHandle;
 const EDE_OPTION_CODE: u16 = 15;
 /// The "Blocked" Extended DNS Error, as its two-byte wire value (RFC 8914 section 4.16).
 const EDE_BLOCKED: [u8; 2] = 15_u16.to_be_bytes();
+/// The "DNSSEC Bogus" Extended DNS Error (RFC 8914 section 4.7).
+const EDE_DNSSEC_BOGUS: [u8; 2] = 6_u16.to_be_bytes();
 
 /// Validates requests, applies policy and forwards allowed queries upstream.
 pub struct ForwardHandler {
     pool: Arc<UpstreamPool>,
     permits: Semaphore,
     policy: PolicyHandle,
+    telemetry: Option<Arc<Telemetry>>,
+    cache: Option<Arc<DnsCache>>,
+    validator: Option<DnssecValidator>,
+}
+
+/// Why a query was blocked, owned so it can outlive the policy snapshot.
+#[derive(Clone, Debug, Default)]
+struct BlockReason {
+    rule_id: Option<String>,
+    source_list_id: Option<String>,
+    matched_name: Option<String>,
+}
+
+impl BlockReason {
+    fn new(decision: &Decision<'_>, matched_name: &str) -> Self {
+        let (rule_id, source_list_id) = match decision.source {
+            DecisionSource::Rule(id) => (Some(id.to_owned()), None),
+            DecisionSource::List(id) => (None, Some(id.to_owned())),
+            DecisionSource::Default => (None, None),
+        };
+        Self {
+            rule_id,
+            source_list_id,
+            matched_name: Some(matched_name.to_owned()),
+        }
+    }
+}
+
+/// How a request ended, for telemetry.
+struct Finished {
+    info: ResponseInfo,
+    outcome: Outcome,
+    reason: BlockReason,
+    upstream: Option<String>,
+}
+
+impl Finished {
+    fn plain(info: ResponseInfo, outcome: Outcome) -> Self {
+        Self {
+            info,
+            outcome,
+            reason: BlockReason::default(),
+            upstream: None,
+        }
+    }
+}
+
+/// How an upstream answer was obtained, and what the client asked for.
+struct AnswerMeta {
+    dnssec_ok: bool,
+    /// Whether this node validated the answer with DNSSEC.
+    validated: bool,
+    /// The server that answered, or `None` for an answer from the cache.
+    upstream: Option<String>,
+}
+
+enum AnswerAction {
+    Return,
+    Block(BlockConfig, BlockReason),
+    Fail,
 }
 
 impl ForwardHandler {
@@ -34,22 +104,28 @@ impl ForwardHandler {
         pool: Arc<UpstreamPool>,
         max_concurrent_requests: usize,
         policy: PolicyHandle,
+        telemetry: Option<Arc<Telemetry>>,
+        cache: Option<Arc<DnsCache>>,
+        validator: Option<DnssecValidator>,
     ) -> Self {
         Self {
             pool,
             permits: Semaphore::new(max_concurrent_requests),
             policy,
+            telemetry,
+            cache,
+            validator,
         }
     }
 
     /// Checks a query name, returning how to answer if it's blocked.
-    fn query_block(&self, source: IpAddr, name: &DomainName) -> Option<BlockConfig> {
+    fn query_block(&self, source: IpAddr, name: &DomainName) -> Option<(BlockConfig, BlockReason)> {
         let policy = self.policy.load();
         match policy.check_query(source, name) {
-            Verdict::Allow | Verdict::ChainTooDeep => None,
+            Verdict::Allow | Verdict::ChainTooDeep | Verdict::BlockTarget { .. } => None,
             Verdict::Block(decision) => {
                 debug!(name = name.as_str(), ?decision, "blocked query");
-                Some(policy.block())
+                Some((policy.block(), BlockReason::new(&decision, name.as_str())))
             }
         }
     }
@@ -66,17 +142,420 @@ impl ForwardHandler {
             Verdict::Allow => AnswerAction::Return,
             Verdict::Block(decision) => {
                 debug!(name = name.as_str(), ?decision, "blocked answer");
-                AnswerAction::Block(policy.block())
+                AnswerAction::Block(policy.block(), BlockReason::new(&decision, name.as_str()))
+            }
+            Verdict::BlockTarget {
+                decision,
+                target_index,
+            } => {
+                debug!(name = name.as_str(), ?decision, "blocked CNAME target");
+                let matched = targets
+                    .get(target_index)
+                    .map_or(name.as_str(), DomainName::as_str);
+                AnswerAction::Block(policy.block(), BlockReason::new(&decision, matched))
             }
             Verdict::ChainTooDeep => AnswerAction::Fail,
         }
     }
+
+    /// Runs the request path. Everything observable about the result comes back in `Finished`.
+    async fn process<R: ResponseHandler>(&self, request: &Request, response_handle: R) -> Finished {
+        if request.metadata.op_code != OpCode::Query {
+            let info = send_error(request, ResponseCode::NotImp, response_handle).await;
+            return Finished::plain(info, Outcome::Rejected);
+        }
+        if request.edns.as_ref().is_some_and(|edns| edns.version() > 0) {
+            let info = send_error(request, ResponseCode::BADVERS, response_handle).await;
+            return Finished::plain(info, Outcome::Rejected);
+        }
+
+        let [question] = request.queries.queries() else {
+            let info = send_error(request, ResponseCode::FormErr, response_handle).await;
+            return Finished::plain(info, Outcome::Rejected);
+        };
+        // Only Internet-class lookups are forwarded, and zone transfers are never served.
+        if question.query_class() != DNSClass::IN
+            || matches!(question.query_type(), RecordType::AXFR | RecordType::IXFR)
+        {
+            let info = send_error(request, ResponseCode::Refused, response_handle).await;
+            return Finished::plain(info, Outcome::Rejected);
+        }
+
+        // A name that can't be normalized can't be checked, so it must not get past policy.
+        let Ok(name) = DomainName::parse(&question.name().to_string()) else {
+            debug!(src = %request.src(), "refused a name that can't be normalized");
+            let info = send_error(request, ResponseCode::Refused, response_handle).await;
+            return Finished::plain(info, Outcome::Rejected);
+        };
+        let source = request.src().ip();
+
+        // Names this node owns are answered here and never go upstream.
+        if let Some(finished) = self
+            .answer_locally(request, question, &name, source, response_handle.clone())
+            .await
+        {
+            return finished;
+        }
+
+        // Blocked queries need no upstream capacity, so they're decided before admission.
+        if let Some((block, reason)) = self.query_block(source, &name) {
+            let info = send_blocked(request, question, block, response_handle).await;
+            return Finished {
+                info,
+                outcome: Outcome::Blocked,
+                reason,
+                upstream: None,
+            };
+        }
+
+        let edns = request.edns.as_ref().map(|edns| EdnsRequest {
+            max_payload: edns.max_payload(),
+            dnssec_ok: edns.flags().dnssec_ok,
+        });
+        let dnssec_ok = edns.is_some_and(|edns| edns.dnssec_ok);
+        let cache_key = self.cache.as_ref().map(|_| CacheKey {
+            name: name.as_str().to_owned(),
+            record_type: question.query_type(),
+            dnssec_ok,
+            checking_disabled: request.metadata.checking_disabled,
+        });
+        if let (Some(cache), Some(key)) = (&self.cache, &cache_key)
+            && let Some(hit) = cache.get(key)
+        {
+            return self
+                .finish_answer(
+                    request,
+                    question,
+                    &name,
+                    hit.message,
+                    AnswerMeta {
+                        dnssec_ok,
+                        validated: hit.validated,
+                        upstream: None,
+                    },
+                    response_handle,
+                )
+                .await;
+        }
+
+        let Ok(_permit) = self.permits.try_acquire() else {
+            debug!(src = %request.src(), "over the concurrent request limit");
+            let info = send_error(request, ResponseCode::ServFail, response_handle).await;
+            return Finished::plain(info, Outcome::Failed);
+        };
+
+        // CD means the client wants to validate for itself, so this node stays out of the way.
+        if let Some(validator) = &self.validator
+            && !request.metadata.checking_disabled
+        {
+            let validated = match validator.resolve(question.original().clone()).await {
+                Ok(validated) => validated,
+                Err(error) => {
+                    warn!(%error, "forwarding failed");
+                    let info = send_error(request, ResponseCode::ServFail, response_handle).await;
+                    return Finished::plain(info, Outcome::Failed);
+                }
+            };
+            if validated.status == DnssecStatus::Bogus {
+                debug!(name = name.as_str(), "DNSSEC validation failed");
+                let info = send_dnssec_bogus(request, response_handle).await;
+                return Finished::plain(info, Outcome::Failed);
+            }
+            let secure = validated.status == DnssecStatus::Secure;
+            if let (Some(cache), Some(key)) = (&self.cache, cache_key) {
+                cache.insert(key, &validated.message, secure);
+            }
+            return self
+                .finish_answer(
+                    request,
+                    question,
+                    &name,
+                    validated.message,
+                    AnswerMeta {
+                        dnssec_ok,
+                        validated: secure,
+                        upstream: self.pool.last_server(),
+                    },
+                    response_handle,
+                )
+                .await;
+        }
+
+        let upstream_request = UpstreamRequest {
+            query: question.original().clone(),
+            recursion_desired: request.metadata.recursion_desired,
+            checking_disabled: request.metadata.checking_disabled,
+            edns,
+        };
+
+        let forwarded = match self.pool.forward(&upstream_request).await {
+            Ok(forwarded) => forwarded,
+            Err(error) => {
+                warn!(%error, "forwarding failed");
+                let info = send_error(request, ResponseCode::ServFail, response_handle).await;
+                return Finished::plain(info, Outcome::Failed);
+            }
+        };
+
+        // The answer is stored before policy runs, because the cache holds upstream answers and
+        // never policy decisions. Policy checks every answer, wherever it came from.
+        if let (Some(cache), Some(key)) = (&self.cache, cache_key) {
+            cache.insert(key, &forwarded.message, false);
+        }
+        self.finish_answer(
+            request,
+            question,
+            &name,
+            forwarded.message,
+            AnswerMeta {
+                dnssec_ok,
+                validated: false,
+                upstream: Some(forwarded.server),
+            },
+            response_handle,
+        )
+        .await
+    }
+
+    /// Answers from local zones and reserved names, if this node owns the question.
+    async fn answer_locally<R: ResponseHandler>(
+        &self,
+        request: &Request,
+        question: &LowerQuery,
+        name: &DomainName,
+        source: IpAddr,
+        response_handle: R,
+    ) -> Option<Finished> {
+        let (answer, blocked) = {
+            let policy = self.policy.load();
+            let answer = policy.local_answer(name, local_query(question.query_type()))?;
+            let blocked = match policy.check_local(source, &answer) {
+                Verdict::Allow | Verdict::ChainTooDeep => None,
+                Verdict::Block(decision) => {
+                    Some((policy.block(), BlockReason::new(&decision, name.as_str())))
+                }
+                Verdict::BlockTarget {
+                    decision,
+                    target_index,
+                } => {
+                    let matched = answer
+                        .names
+                        .get(target_index + 1)
+                        .map_or(name.as_str(), DomainName::as_str);
+                    Some((policy.block(), BlockReason::new(&decision, matched)))
+                }
+            };
+            (answer, blocked)
+        };
+        if let Some((block, reason)) = blocked {
+            let info = send_blocked(request, question, block, response_handle).await;
+            return Some(Finished {
+                info,
+                outcome: Outcome::Blocked,
+                reason,
+                upstream: None,
+            });
+        }
+        let info = send_local(request, question, &answer, response_handle).await;
+        Some(Finished::plain(info, Outcome::Local))
+    }
+
+    /// Applies policy to an upstream answer, whether it's fresh or cached, and responds.
+    async fn finish_answer<R: ResponseHandler>(
+        &self,
+        request: &Request,
+        question: &LowerQuery,
+        name: &DomainName,
+        message: Message,
+        meta: AnswerMeta,
+        response_handle: R,
+    ) -> Finished {
+        let AnswerMeta {
+            dnssec_ok,
+            validated,
+            upstream,
+        } = meta;
+        let source = request.src().ip();
+        let action = match cname_targets(&message) {
+            Some(targets) => self.answer_action(source, name, &targets),
+            None => AnswerAction::Fail,
+        };
+        match action {
+            AnswerAction::Return => {
+                let failed = matches!(
+                    message.metadata.response_code,
+                    ResponseCode::ServFail | ResponseCode::Refused
+                );
+                let info =
+                    send_upstream_response(request, message, dnssec_ok, validated, response_handle)
+                        .await;
+                let outcome = match (failed, &upstream) {
+                    (true, _) => Outcome::Failed,
+                    (false, Some(_)) => Outcome::Forwarded,
+                    (false, None) => Outcome::Cached,
+                };
+                Finished {
+                    info,
+                    outcome,
+                    reason: BlockReason::default(),
+                    upstream,
+                }
+            }
+            AnswerAction::Block(block, reason) => {
+                let info = send_blocked(request, question, block, response_handle).await;
+                Finished {
+                    info,
+                    outcome: Outcome::Blocked,
+                    reason,
+                    upstream,
+                }
+            }
+            AnswerAction::Fail => {
+                debug!(src = %request.src(), "an answer's CNAME chain can't be checked");
+                let info = send_error(request, ResponseCode::ServFail, response_handle).await;
+                Finished::plain(info, Outcome::Failed)
+            }
+        }
+    }
+
+    /// Records a finished request. This only touches memory and a bounded queue.
+    fn record(&self, request: &Request, finished: Finished, started: Instant) {
+        let Some(telemetry) = &self.telemetry else {
+            return;
+        };
+        let policy = self.policy.load();
+        let source = request.src().ip().to_canonical();
+        let question = request.queries.queries().first();
+        let occurred_at_ms = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map_or(0, |elapsed| {
+                i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX)
+            });
+        let event = QueryEvent {
+            seq: 0,
+            occurred_at_ms,
+            client_id: policy
+                .identity(source)
+                .map(|identity| identity.id.to_string()),
+            client_ip: Some(source.to_string()),
+            qname: question.map(|question| {
+                let name = question.name().to_string();
+                let trimmed = name.strip_suffix('.').unwrap_or(&name);
+                if trimmed.is_empty() {
+                    ".".to_owned()
+                } else {
+                    trimmed.to_owned()
+                }
+            }),
+            matched_name: finished.reason.matched_name,
+            qtype: question.map_or_else(
+                || "NONE".to_owned(),
+                |question| question.query_type().to_string(),
+            ),
+            outcome: finished.outcome,
+            rcode: finished.info.response_code.to_str().to_owned(),
+            rule_id: finished.reason.rule_id,
+            source_list_id: finished.reason.source_list_id,
+            upstream: finished.upstream,
+            duration_us: u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX),
+            revision_id: Some(policy.revision().to_owned()),
+        };
+        telemetry.record(event, policy.telemetry().mode);
+    }
 }
 
-enum AnswerAction {
-    Return,
-    Block(BlockConfig),
-    Fail,
+fn local_query(record_type: RecordType) -> LocalQuery {
+    match record_type {
+        RecordType::A => LocalQuery::A,
+        RecordType::AAAA => LocalQuery::Aaaa,
+        RecordType::CNAME => LocalQuery::Cname,
+        RecordType::PTR => LocalQuery::Ptr,
+        RecordType::SOA => LocalQuery::Soa,
+        RecordType::NS => LocalQuery::Ns,
+        RecordType::ANY => LocalQuery::Any,
+        _ => LocalQuery::Other,
+    }
+}
+
+fn wire_name(name: &DomainName) -> Option<Name> {
+    Name::from_ascii(format!("{}.", name.as_str())).ok()
+}
+
+fn zone_soa(zone: &DomainName, ttl: u32) -> Option<Record> {
+    let owner = wire_name(zone)?;
+    let host = Name::from_ascii(format!("ns.{}.", zone.as_str())).ok()?;
+    let admin = Name::from_ascii(format!("hostmaster.{}.", zone.as_str())).ok()?;
+    let rdata = SOA::new(
+        host,
+        admin,
+        1,
+        3600,
+        600,
+        86_400,
+        LOCAL_NEGATIVE_TTL_SECONDS,
+    );
+    Some(Record::from_rdata(owner, ttl, RData::SOA(rdata)))
+}
+
+fn wire_record(record: &LocalRecord) -> Option<Record> {
+    let owner = wire_name(&record.name)?;
+    let data = match &record.data {
+        LocalData::A(ip) => RData::A(A(*ip)),
+        LocalData::Aaaa(ip) => RData::AAAA(AAAA(*ip)),
+        LocalData::Cname(target) => RData::CNAME(CNAME(wire_name(target)?)),
+        LocalData::Ptr(target) => RData::PTR(PTR(wire_name(target)?)),
+        LocalData::Soa => return zone_soa(&record.name, record.ttl),
+        LocalData::Ns => RData::NS(NS(Name::from_ascii(format!(
+            "ns.{}.",
+            record.name.as_str()
+        ))
+        .ok()?)),
+    };
+    Some(Record::from_rdata(owner, record.ttl, data))
+}
+
+async fn send_local<R: ResponseHandler>(
+    request: &Request,
+    question: &LowerQuery,
+    answer: &LocalAnswer,
+    mut response_handle: R,
+) -> ResponseInfo {
+    let records: Vec<Record> = answer.records.iter().filter_map(wire_record).collect();
+    let code = if answer.nxdomain {
+        ResponseCode::NXDomain
+    } else {
+        ResponseCode::NoError
+    };
+    // Negative answers carry a SOA, so clients know how long to cache them (RFC 2308).
+    let authorities: Vec<Record> = if records.is_empty() {
+        match &answer.zone {
+            Some(zone) => zone_soa(zone, LOCAL_NEGATIVE_TTL_SECONDS),
+            None => block_soa(question.original().name(), LOCAL_NEGATIVE_TTL_SECONDS),
+        }
+        .into_iter()
+        .collect()
+    } else {
+        Vec::new()
+    };
+
+    let edns = response_edns(request);
+    let mut metadata = response_metadata(request, code);
+    metadata.authoritative = answer.zone.is_some();
+    let builder = MessageResponseBuilder::new(&request.queries, edns.as_ref());
+    let response = builder.build(
+        metadata,
+        records.iter(),
+        authorities.iter(),
+        std::iter::empty(),
+        std::iter::empty(),
+    );
+    match response_handle.send_response(response).await {
+        Ok(info) => info,
+        Err(error) => {
+            warn!(%error, "failed to send a local DNS response");
+            failed_info(metadata)
+        }
+    }
 }
 
 /// The CNAME targets in an answer, or `None` if one can't be normalized.
@@ -207,18 +686,47 @@ async fn send_error<R: ResponseHandler>(
     }
 }
 
+/// SERVFAIL with an Extended DNS Error saying why, so a failure isn't mistaken for an outage.
+async fn send_dnssec_bogus<R: ResponseHandler>(
+    request: &Request,
+    mut response_handle: R,
+) -> ResponseInfo {
+    let mut edns = response_edns(request);
+    if let Some(edns) = &mut edns {
+        edns.options_mut().insert(EdnsOption::Unknown(
+            EDE_OPTION_CODE,
+            EDE_DNSSEC_BOGUS.to_vec(),
+        ));
+    }
+    let metadata = response_metadata(request, ResponseCode::ServFail);
+    let builder = MessageResponseBuilder::new(&request.queries, edns.as_ref());
+    match response_handle
+        .send_response(builder.build_no_records(metadata))
+        .await
+    {
+        Ok(info) => info,
+        Err(error) => {
+            warn!(%error, "failed to send DNS error response");
+            failed_info(metadata)
+        }
+    }
+}
+
 async fn send_upstream_response<R: ResponseHandler>(
     request: &Request,
     upstream: Message,
     dnssec_ok: bool,
+    validated: bool,
     mut response_handle: R,
 ) -> ResponseInfo {
     let upstream = upstream.maybe_strip_dnssec_records(dnssec_ok);
     let edns = response_edns(request);
 
-    // AD and AA stay clear: this node hasn't validated the answer and isn't its authority.
+    // AA stays clear because this node isn't the answer's authority. AD is only ever this node's
+    // own conclusion, never copied from upstream, and only for clients that asked (RFC 6840).
     let mut metadata = response_metadata(request, upstream.metadata.response_code);
     metadata.truncation = upstream.metadata.truncation;
+    metadata.authentic_data = validated && (dnssec_ok || request.metadata.authentic_data);
 
     let builder = MessageResponseBuilder::new(&request.queries, edns.as_ref());
     let response = builder.build(
@@ -244,75 +752,10 @@ impl RequestHandler for ForwardHandler {
         request: &Request,
         response_handle: R,
     ) -> ResponseInfo {
-        if request.metadata.op_code != OpCode::Query {
-            return send_error(request, ResponseCode::NotImp, response_handle).await;
-        }
-        if request.edns.as_ref().is_some_and(|edns| edns.version() > 0) {
-            return send_error(request, ResponseCode::BADVERS, response_handle).await;
-        }
-
-        let [question] = request.queries.queries() else {
-            return send_error(request, ResponseCode::FormErr, response_handle).await;
-        };
-        // Only Internet-class lookups are forwarded, and zone transfers are never served.
-        if question.query_class() != DNSClass::IN
-            || matches!(question.query_type(), RecordType::AXFR | RecordType::IXFR)
-        {
-            return send_error(request, ResponseCode::Refused, response_handle).await;
-        }
-
-        // A name that can't be normalized can't be checked, so it must not get past policy.
-        let Ok(name) = DomainName::parse(&question.name().to_string()) else {
-            debug!(src = %request.src(), "refused a name that can't be normalized");
-            return send_error(request, ResponseCode::Refused, response_handle).await;
-        };
-        let source = request.src().ip();
-
-        // Blocked queries need no upstream capacity, so they're decided before admission.
-        if let Some(block) = self.query_block(source, &name) {
-            return send_blocked(request, question, block, response_handle).await;
-        }
-
-        let Ok(_permit) = self.permits.try_acquire() else {
-            debug!(src = %request.src(), "over the concurrent request limit");
-            return send_error(request, ResponseCode::ServFail, response_handle).await;
-        };
-
-        let edns = request.edns.as_ref().map(|edns| EdnsRequest {
-            max_payload: edns.max_payload(),
-            dnssec_ok: edns.flags().dnssec_ok,
-        });
-        let dnssec_ok = edns.is_some_and(|edns| edns.dnssec_ok);
-        let upstream_request = UpstreamRequest {
-            query: question.original().clone(),
-            recursion_desired: request.metadata.recursion_desired,
-            checking_disabled: request.metadata.checking_disabled,
-            edns,
-        };
-
-        let upstream = match self.pool.forward(&upstream_request).await {
-            Ok(upstream) => upstream,
-            Err(error) => {
-                warn!(%error, "forwarding failed");
-                return send_error(request, ResponseCode::ServFail, response_handle).await;
-            }
-        };
-
-        let action = match cname_targets(&upstream) {
-            Some(targets) => self.answer_action(source, &name, &targets),
-            None => AnswerAction::Fail,
-        };
-        match action {
-            AnswerAction::Return => {
-                send_upstream_response(request, upstream, dnssec_ok, response_handle).await
-            }
-            AnswerAction::Block(block) => {
-                send_blocked(request, question, block, response_handle).await
-            }
-            AnswerAction::Fail => {
-                debug!(src = %request.src(), "an answer's CNAME chain can't be checked");
-                send_error(request, ResponseCode::ServFail, response_handle).await
-            }
-        }
+        let started = Instant::now();
+        let finished = self.process(request, response_handle).await;
+        let info = finished.info;
+        self.record(request, finished, started);
+        info
     }
 }

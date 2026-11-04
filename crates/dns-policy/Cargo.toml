@@ -7,6 +7,7 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+fst.workspace = true
 humantime.workspace = true
 idna.workspace = true
 ipnet.workspace = true

@@ -8,10 +8,16 @@ publish.workspace = true
 
 [dependencies]
 arc-swap.workspace = true
+dns-cache.workspace = true
 dns-policy.workspace = true
 dns-runtime.workspace = true
 dns-upstreams.workspace = true
 hickory-proto.workspace = true
 ipnet.workspace = true
 rand.workspace = true
+rcgen.workspace = true
+ring = "0.17"
+rustls.workspace = true
+time = "0.3"
+tokio-rustls.workspace = true
 tokio.workspace = true

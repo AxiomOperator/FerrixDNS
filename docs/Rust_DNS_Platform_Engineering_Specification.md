@@ -1019,18 +1019,18 @@ These items are not yet resolved in this specification.
 
 **Standalone first run**
 
-- Define how operators reach the UI on headless and container installs when it binds to localhost by default.
-- Bootstrap the first admin safely, for example with a one-time setup token.
-- Define the node UI's TLS certificate plan, since Secure cookies depend on it.
-- Add DNS rebinding/Host validation, login throttling and CSV injection through query names to the threat model.
-- Document Docker networking that preserves client IPs.
+- Load renewed TLS certificates without a restart, and renew the self-signed certificate. See `docs/operations/install.md` for the current options.
+- Add DNS rebinding/Host validation and login throttling to the threat model (both are implemented), and CSV injection through query names when query export is built.
 
 **Runtime and DNS behavior**
 
-- Choose the snapshot format and compilation isolation (subprocess or mmap, separate runtime) to keep compilation from causing an OOM on 1 GB devices.
+- Measure on a real low-powered device and document reduced defaults. A 1 GiB memory cap held with lists up to 5M generated entries, on fast CPUs (`docs/performance.md`). List indexes use finite state transducers and compile on blocking threads inside the node, and a compiler subprocess hasn't been needed so far.
+- Run the arm64 build on real hardware. It's cross-compiled and passes the library tests under emulation, but its release workflow hasn't run.
 - Define DNS behavior at boot when no valid snapshot exists: fail open, fail closed or delay binding.
-- Run a Phase 0 Hickory spike covering custom cache and upstream fit with DNSSEC validation, plus throughput. `hickory-server` is pre-1.0.
-- Define RFC 6303/6761 name handling.
+- Decide how to answer reverse lookups for private addresses from a router or AD DNS. RFC 6303 names now stay local (NXDOMAIN, or a generated PTR for local records), so this needs conditional forwarding.
+- Let local CNAMEs point outside local zones. They're currently limited to names the node manages, so it never has to chase one upstream.
+- Check HTTPS/SVCB alias targets and DNAME records against policy. Only CNAME targets are checked.
+- Fuzz the packet path with coverage guidance, and report DNSSEC failures in the query log. Bogus answers are currently recorded only as failed.
 - Review whether a broad suffix or regex allow should outrank a narrower deny in the same scope, as the tier order currently specifies.
 
 **Privacy and telemetry**
@@ -1046,11 +1046,19 @@ These items are not yet resolved in this specification.
 - Map v0.1, v1.0 and v1.5 to phases. FR-006 is P0 and packaging is in v0.1 scope, but both arrive in Phase 4.
 - Add the promised acceptance-ID mapping (§2) and make weak acceptance criteria testable.
 - Specify the `fx` CLI, and check the name for conflicts with existing tools.
-- Add missing node API endpoints: login/logout, setup, restore, token management, cache flush, list/group/record update and delete, query export, a Prometheus endpoint and temporary blocking pause.
+- Add missing node API endpoints: API token management, query export, a Prometheus endpoint and temporary blocking pause. Web restores don't include accounts, by design.
+- Stream backups rather than building them in memory, and consider including query history as an explicit choice (§7.4).
+- `fx backup create` opens the policy store the same way a node does, which clears leftover temporary files. A change saved by a running node at that exact moment can fail and need retrying.
 - Add missing controller API endpoints: deployment cancel and node revoke.
-- Complete the node schema: users, sessions, tokens, upstreams and jobs.
+- Complete the node schema: API tokens and editable upstreams. Upstreams are currently set with `--upstream` and are read-only in the UI.
 - Align remaining names, such as `deny`/`blocked` and `client_ip`/`address`.
-- Add the setup wizard route, and routes or API rows for the Analytics and Cache pages.
+- Add the Analytics page.
+- Add conditional forwarders, IPv6 coverage in the test matrix, and import tooling, which v1.0 lists (§1.3).
+- Verify the packaged service's `DynamicUser` on a real host. The unit's other hardening was tested under real systemd in a container, where `DynamicUser` itself can't run rootless. Verify the release workflow, which hasn't run.
+- Add SBOMs, signed artifacts and reproducible builds to releases (§8.4).
+- Decide whether to add a TypeScript linter to CI, and per-client logging exclusions (§2.1).
+- Reconcile §4.3 with the implementation. `migrations/` is now the source of truth: policy lives only in revision files, so `config.db` holds accounts, sessions, list fetch state and the audit log, with no table projections (ADR-012). Telemetry timestamps are integer milliseconds.
+- Revisit the query log's single-row button in the virtualized table, which passes automated checks but isn't a true table for screen readers.
 - Re-estimate the plan. Phase 7 contains a 30-day soak in 3-5 weeks, Phase 4 looks undersized, and Phases 2 and 6 gained scope from the decisions above.
 - Choose a product license and define downgrade behavior after migrations.
 - Add LAN-level redundancy guidance behind the 99.95% target.

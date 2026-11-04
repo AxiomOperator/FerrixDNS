@@ -120,18 +120,18 @@ fn regex_match<'s>(matchers: &'s Matchers, name: &DomainName) -> Option<&'s str>
 }
 
 fn list_match(matchers: &ListMatchers, name: &DomainName) -> Option<u32> {
-    let exact = matchers.exact.get(name.as_str()).copied();
+    let exact = matchers.exact.get(name.as_str());
     let suffix = if matchers.suffix.is_empty() {
         None
     } else {
         name.suffixes()
             .find_map(|suffix| matchers.suffix.get(suffix))
-            .copied()
     };
-    match (exact, suffix) {
-        (Some(left), Some(right)) => Some(left.min(right)),
-        (left, right) => left.or(right),
-    }
+    let position = match (exact, suffix) {
+        (Some(left), Some(right)) => left.min(right),
+        (left, right) => left.or(right)?,
+    };
+    u32::try_from(position).ok()
 }
 
 fn lowest_list(layer: &ListLayer, positions: impl Iterator<Item = u32>) -> Option<&str> {
@@ -400,13 +400,14 @@ mod tests {
                 .iter()
                 .map(|entry| ListEntry::Exact(name(entry)))
                 .collect(),
+            artifact: None,
         }
     }
 
     fn snapshot(rules: &[Rule], lists: &[ListSource]) -> PolicySnapshot {
         PolicySnapshot::new(
             "rev-1",
-            Arc::new(ListLayer::compile(lists)),
+            Arc::new(ListLayer::compile(lists).unwrap()),
             Arc::new(RuleOverlay::compile(rules, SystemTime::now()).unwrap()),
         )
     }
@@ -760,6 +761,7 @@ mod tests {
             action: RuleAction::Deny,
             groups: vec![],
             entries: vec![ListEntry::Suffix(name("tracker.example"))],
+            artifact: None,
         };
         let policy = snapshot(&[], &[source]);
         assert_eq!(
@@ -770,12 +772,43 @@ mod tests {
     }
 
     #[test]
+    fn artifacts_compile_and_match_like_entries() {
+        let source = ListSource {
+            id: "l1".into(),
+            action: RuleAction::Deny,
+            groups: vec![],
+            entries: vec![],
+            artifact: Some(b"e ads.example\ns tracker.example\n".to_vec()),
+        };
+        let policy = snapshot(&[], &[source]);
+        assert_eq!(decide(&policy, "ads.example").tier, Tier::SubscribedDeny);
+        assert_eq!(decide(&policy, "x.ads.example").action, Action::Allow);
+        assert_eq!(
+            decide(&policy, "x.tracker.example").tier,
+            Tier::SubscribedDeny
+        );
+
+        let corrupt = ListSource {
+            id: "l2".into(),
+            action: RuleAction::Deny,
+            groups: vec![],
+            entries: vec![],
+            artifact: Some(b"z nope\n".to_vec()),
+        };
+        assert!(matches!(
+            ListLayer::compile(&[corrupt]),
+            Err(CompileError::ListArtifact { .. })
+        ));
+    }
+
+    #[test]
     fn root_list_entries_are_ignored() {
         let source = ListSource {
             id: "l1".into(),
             action: RuleAction::Deny,
             groups: vec![],
             entries: vec![ListEntry::Suffix(name(".")), ListEntry::Exact(name("."))],
+            artifact: None,
         };
         let policy = snapshot(&[], &[source]);
         assert_eq!(decide(&policy, "example.com").action, Action::Allow);
@@ -1033,12 +1066,9 @@ mod tests {
 
     #[test]
     fn layers_can_be_swapped_independently() {
-        let lists = Arc::new(ListLayer::compile(&[list(
-            "l1",
-            RuleAction::Deny,
-            &[],
-            &["a.example"],
-        )]));
+        let lists = Arc::new(
+            ListLayer::compile(&[list("l1", RuleAction::Deny, &[], &["a.example"])]).unwrap(),
+        );
         let first = PolicySnapshot::new(
             "rev-1",
             Arc::clone(&lists),

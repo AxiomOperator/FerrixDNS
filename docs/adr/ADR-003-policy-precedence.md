@@ -46,6 +46,7 @@ would be bypassed by a cached answer.
 
 ## Implementation note
 
-Suffix matching probes a hash map once per label rather than walking the reversed-label trie named in
-spec section 3.5. The matching behavior is the same and the code is simpler. Revisit this if memory
-measurements on large lists favor a trie.
+Suffix matching probes an index once per label rather than walking the reversed-label trie named in
+spec section 3.5. Rules use hash maps, and subscribed lists use finite state transducers, which
+reduced 5M domains from about 651 MiB to about 40 MiB in testing (`docs/performance.md`). The matching
+behavior is the same.

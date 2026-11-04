@@ -9,11 +9,14 @@ publish.workspace = true
 [dependencies]
 arc-swap.workspace = true
 async-trait.workspace = true
+dns-cache.workspace = true
 dns-policy.workspace = true
 dns-storage.workspace = true
+dns-telemetry.workspace = true
 dns-upstreams.workspace = true
 hickory-server.workspace = true
 ipnet.workspace = true
+socket2.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true

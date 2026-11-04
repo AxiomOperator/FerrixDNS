@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use ipnet::IpNet;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::compile::{
@@ -12,6 +12,7 @@ use crate::compile::{
     RuleOverlay, Scope,
 };
 use crate::evaluate::{Action, ChainOutcome, ClientContext, Decision, NameContext};
+use crate::local::{LocalAnswer, LocalQuery, LocalRecordDef, LocalZoneDef, LocalZones};
 use crate::name::{DomainName, NameError};
 
 /// The policy document version this build understands.
@@ -19,6 +20,9 @@ pub const SCHEMA_VERSION: u32 = 1;
 /// Longest accepted TTL for blocked answers. Long TTLs delay exceptions on client caches.
 pub const MAX_BLOCK_TTL_SECONDS: u32 = 86_400;
 const DEFAULT_BLOCK_TTL_SECONDS: u32 = 60;
+const DEFAULT_QUERY_HISTORY_DAYS: u32 = 7;
+const DEFAULT_QUERY_HISTORY_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+const DEFAULT_LIST_REFRESH_SECONDS: u64 = 86_400;
 
 /// Why a policy document was rejected.
 #[derive(Debug, Error)]
@@ -49,12 +53,25 @@ pub enum PolicyError {
         value: String,
         source: NameError,
     },
+    #[error("list {list_id}: cannot load its downloaded content: {reason}")]
+    ArtifactUnavailable { list_id: String, reason: String },
+    #[error("{0}")]
+    LocalDns(String),
+    #[error("cannot serialize the policy document: {0}")]
+    Serialize(#[from] toml::ser::Error),
     #[error(transparent)]
     Compile(#[from] CompileError),
 }
 
+/// Loads a downloaded list's normalized content by hash.
+pub type ArtifactLoader<'a> = &'a dyn Fn(&str) -> Result<Vec<u8>, String>;
+
+fn no_artifacts(_: &str) -> Result<Vec<u8>, String> {
+    Err("no list artifact store is available".to_owned())
+}
+
 /// How blocked queries are answered.
-#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum BlockResponse {
     /// NXDOMAIN for every query type.
@@ -69,7 +86,7 @@ fn default_block_ttl() -> u32 {
 }
 
 /// How blocked queries are answered, and how long clients may cache that answer.
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct BlockConfig {
     #[serde(default)]
@@ -87,11 +104,67 @@ impl Default for BlockConfig {
     }
 }
 
+/// What the node records about each query.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum QueryLogMode {
+    /// Per-query history including the client. Kept only on this node.
+    #[default]
+    Full,
+    /// Per-query history without client addresses or identities.
+    Anonymized,
+    /// Counters only.
+    AggregateOnly,
+    /// Nothing is recorded.
+    Disabled,
+}
+
+fn default_history_days() -> u32 {
+    DEFAULT_QUERY_HISTORY_DAYS
+}
+
+fn default_history_bytes() -> u64 {
+    DEFAULT_QUERY_HISTORY_MAX_BYTES
+}
+
+/// How much query data the node keeps. Whichever limit is reached first applies.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TelemetryConfig {
+    #[serde(default)]
+    pub mode: QueryLogMode,
+    #[serde(default = "default_history_days")]
+    pub query_history_days: u32,
+    #[serde(default = "default_history_bytes")]
+    pub query_history_max_bytes: u64,
+}
+
+impl Default for TelemetryConfig {
+    fn default() -> Self {
+        Self {
+            mode: QueryLogMode::default(),
+            query_history_days: DEFAULT_QUERY_HISTORY_DAYS,
+            query_history_max_bytes: DEFAULT_QUERY_HISTORY_MAX_BYTES,
+        }
+    }
+}
+
+/// A named group that clients, rules and lists can refer to.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GroupDef {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
 /// A known client and the addresses that identify it.
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ClientDef {
     pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     /// IP addresses or CIDR networks. The most specific match wins.
     pub addresses: Vec<String>,
     #[serde(default)]
@@ -107,7 +180,7 @@ fn global_scope() -> Scope {
 }
 
 /// A rule as written in a policy document.
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RuleDef {
     pub id: String,
@@ -122,18 +195,59 @@ pub struct RuleDef {
     #[serde(default = "enabled_by_default")]
     pub enabled: bool,
     /// When the rule stops applying, in RFC 3339 UTC.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// Increments on each change, for optimistic concurrency.
+    #[serde(default = "first_revision")]
+    pub revision: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<String>,
 }
 
-/// A list of domains written directly in a policy document.
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+fn first_revision() -> u64 {
+    1
+}
+
+fn default_refresh_seconds() -> u64 {
+    DEFAULT_LIST_REFRESH_SECONDS
+}
+
+/// The format of a downloaded list.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ListFormat {
+    /// `0.0.0.0 ads.example` lines.
+    Hosts,
+    /// One domain per line.
+    Domains,
+    /// Domain-only Adblock syntax: `||ads.example^`.
+    Adblock,
+}
+
+/// A list of domains, written directly in the document or downloaded from a URL.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ListDef {
     pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     pub action: RuleAction,
+    #[serde(default = "enabled_by_default")]
+    pub enabled: bool,
+    /// Where to download the list. Lists without a URL use `domains` and `suffixes`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<ListFormat>,
+    #[serde(default = "default_refresh_seconds")]
+    pub refresh_seconds: u64,
+    /// The downloaded content this revision enforces. Pinning it makes rollbacks exact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_sha256: Option<String>,
     /// Groups the list applies to. With no groups, it applies at global scope.
     #[serde(default)]
     pub groups: Vec<String>,
@@ -146,24 +260,54 @@ pub struct ListDef {
 }
 
 /// The full local policy: the source that revisions are stored and compiled from.
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct PolicyDocument {
     pub schema_version: u32,
     /// This node's site, used to select site-scoped rules.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub site: Option<String>,
     #[serde(default)]
     pub block: BlockConfig,
+    #[serde(default)]
+    pub telemetry: TelemetryConfig,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<GroupDef>,
     #[serde(default)]
     pub clients: Vec<ClientDef>,
     #[serde(default)]
     pub rules: Vec<RuleDef>,
     #[serde(default)]
     pub lists: Vec<ListDef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub local_zones: Vec<LocalZoneDef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub local_records: Vec<LocalRecordDef>,
+}
+
+impl Default for PolicyDocument {
+    fn default() -> Self {
+        Self {
+            schema_version: SCHEMA_VERSION,
+            site: None,
+            block: BlockConfig::default(),
+            telemetry: TelemetryConfig::default(),
+            groups: Vec::new(),
+            clients: Vec::new(),
+            rules: Vec::new(),
+            lists: Vec::new(),
+            local_zones: Vec::new(),
+            local_records: Vec::new(),
+        }
+    }
 }
 
 impl PolicyDocument {
+    /// The document as TOML, in the form stored for each revision.
+    pub fn to_toml(&self) -> Result<String, PolicyError> {
+        Ok(toml::to_string_pretty(self)?)
+    }
+
     /// Parses a TOML document and checks its schema version.
     pub fn parse(source: &str) -> Result<Self, PolicyError> {
         let document: Self = toml::from_str(source)?;
@@ -210,11 +354,12 @@ impl PolicyDocument {
             .collect()
     }
 
-    fn compile_lists(&self) -> Result<ListLayer, PolicyError> {
+    fn compile_lists(&self, artifacts: ArtifactLoader<'_>) -> Result<ListLayer, PolicyError> {
         let mut seen = HashSet::new();
         let lists = self
             .lists
             .iter()
+            .filter(|list| list.enabled)
             .map(|list| {
                 if !seen.insert(list.id.as_str()) {
                     return Err(PolicyError::DuplicateId {
@@ -236,15 +381,26 @@ impl PolicyDocument {
                 for value in &list.suffixes {
                     entries.push(ListEntry::Suffix(parse(value)?));
                 }
+                let artifact = list
+                    .artifact_sha256
+                    .as_deref()
+                    .map(|sha256| {
+                        artifacts(sha256).map_err(|reason| PolicyError::ArtifactUnavailable {
+                            list_id: list.id.clone(),
+                            reason,
+                        })
+                    })
+                    .transpose()?;
                 Ok(ListSource {
                     id: list.id.clone(),
                     action: list.action,
                     groups: list.groups.clone(),
                     entries,
+                    artifact,
                 })
             })
             .collect::<Result<Vec<_>, PolicyError>>()?;
-        Ok(ListLayer::compile(&lists))
+        Ok(ListLayer::compile(&lists)?)
     }
 
     /// Problems that don't stop the policy working, but probably aren't what the operator meant.
@@ -254,6 +410,7 @@ impl PolicyDocument {
             .iter()
             .flat_map(|client| client.groups.iter().map(String::as_str))
             .collect();
+        // A group that exists but is empty is fine, so warnings only use client memberships.
         let clients: HashSet<&str> = self.clients.iter().map(|c| c.id.as_str()).collect();
 
         let mut warnings = Vec::new();
@@ -380,6 +537,11 @@ fn parse_network(value: &str) -> Option<IpNet> {
 pub enum Verdict<'s> {
     Allow,
     Block(Decision<'s>),
+    /// A CNAME target at this position in the answer is blocked.
+    BlockTarget {
+        decision: Decision<'s>,
+        target_index: usize,
+    },
     /// The answer has too many CNAME targets to check.
     ChainTooDeep,
 }
@@ -391,6 +553,8 @@ pub struct CompiledPolicy {
     identities: Identities,
     site: Option<Box<str>>,
     block: BlockConfig,
+    telemetry: TelemetryConfig,
+    local: LocalZones,
 }
 
 impl CompiledPolicy {
@@ -405,6 +569,8 @@ impl CompiledPolicy {
             identities: Identities::default(),
             site: None,
             block: BlockConfig::default(),
+            telemetry: TelemetryConfig::default(),
+            local: LocalZones::default(),
         }
     }
 
@@ -416,6 +582,17 @@ impl CompiledPolicy {
         now: SystemTime,
         previous: Option<(&PolicyDocument, &Self)>,
     ) -> Result<Self, PolicyError> {
+        Self::compile_with(revision, document, now, previous, &no_artifacts)
+    }
+
+    /// Like [`Self::compile`], loading downloaded lists through `artifacts`.
+    pub fn compile_with(
+        revision: &str,
+        document: &PolicyDocument,
+        now: SystemTime,
+        previous: Option<(&PolicyDocument, &Self)>,
+        artifacts: ArtifactLoader<'_>,
+    ) -> Result<Self, PolicyError> {
         if document.block.ttl_seconds > MAX_BLOCK_TTL_SECONDS {
             return Err(PolicyError::BlockTtlTooLong);
         }
@@ -424,7 +601,7 @@ impl CompiledPolicy {
             .map(|(_, policy)| Arc::clone(policy.snapshot.lists()));
         let lists = match reusable {
             Some(lists) => lists,
-            None => Arc::new(document.compile_lists()?),
+            None => Arc::new(document.compile_lists(artifacts)?),
         };
         let rules = RuleOverlay::compile(&document.compile_rules()?, now)?;
 
@@ -433,6 +610,8 @@ impl CompiledPolicy {
             identities: Identities::compile(&document.clients)?,
             site: document.site.as_deref().map(Into::into),
             block: document.block,
+            telemetry: document.telemetry,
+            local: LocalZones::compile(&document.local_zones, &document.local_records)?,
         })
     }
 
@@ -449,6 +628,60 @@ impl CompiledPolicy {
     /// How blocked queries are answered.
     pub fn block(&self) -> BlockConfig {
         self.block
+    }
+
+    /// The answer for a name this node owns, which must not go upstream.
+    pub fn local_answer(&self, name: &DomainName, query: LocalQuery) -> Option<LocalAnswer> {
+        self.local.answer(name, query)
+    }
+
+    /// Checks a local answer's names against rules. Subscribed lists don't apply to local names.
+    pub fn check_local(&self, source: IpAddr, answer: &LocalAnswer) -> Verdict<'_> {
+        if !answer.policy_applies {
+            return Verdict::Allow;
+        }
+        let identity = self.identities.lookup(source);
+        let groups: Vec<&str> = identity
+            .map(|identity| identity.groups.iter().map(AsRef::as_ref).collect())
+            .unwrap_or_default();
+        let context = self.context(identity, &groups);
+        for (index, name) in answer.names.iter().enumerate() {
+            let decision = self
+                .snapshot
+                .evaluate(name, &context, NameContext::LocalZone);
+            if decision.action == Action::Deny {
+                return if index == 0 {
+                    Verdict::Block(decision)
+                } else {
+                    Verdict::BlockTarget {
+                        decision,
+                        target_index: index - 1,
+                    }
+                };
+            }
+        }
+        Verdict::Allow
+    }
+
+    /// What the node records about queries.
+    pub fn telemetry(&self) -> TelemetryConfig {
+        self.telemetry
+    }
+
+    /// The known client for a source address.
+    pub fn identity(&self, source: IpAddr) -> Option<&Identity> {
+        self.identities.lookup(source)
+    }
+
+    /// The full decision for a name and client, including an allow by default.
+    pub fn explain(&self, source: IpAddr, name: &DomainName) -> Decision<'_> {
+        let identity = self.identities.lookup(source);
+        let groups: Vec<&str> = identity
+            .map(|identity| identity.groups.iter().map(AsRef::as_ref).collect())
+            .unwrap_or_default();
+        let context = self.context(identity, &groups);
+        self.snapshot
+            .evaluate(name, &context, NameContext::Forwarded)
     }
 
     /// The earliest moment a rule expires, when this policy must be rebuilt.
@@ -497,7 +730,13 @@ impl CompiledPolicy {
             .evaluate_cname_targets(&decision, targets, &context)
         {
             ChainOutcome::Allowed => Verdict::Allow,
-            ChainOutcome::Blocked { decision, .. } => Verdict::Block(decision),
+            ChainOutcome::Blocked {
+                decision,
+                target_index,
+            } => Verdict::BlockTarget {
+                decision,
+                target_index,
+            },
             ChainOutcome::TooDeep => Verdict::ChainTooDeep,
         }
     }
@@ -585,6 +824,67 @@ suffixes = ["social.example"]
             policy.check_query(ip(source), &name(domain)),
             Verdict::Block(_)
         )
+    }
+
+    #[test]
+    fn documents_survive_a_toml_round_trip() {
+        let mut document = PolicyDocument::parse(EXAMPLE).unwrap();
+        document.groups.push(GroupDef {
+            id: "kids".into(),
+            description: Some("Children".into()),
+        });
+        document.telemetry.mode = QueryLogMode::Anonymized;
+        document.lists.push(ListDef {
+            id: "remote".into(),
+            name: Some("Remote".into()),
+            action: RuleAction::Deny,
+            enabled: true,
+            url: Some("https://lists.example/hosts".into()),
+            format: Some(ListFormat::Hosts),
+            refresh_seconds: 3600,
+            artifact_sha256: Some("abc".into()),
+            groups: vec![],
+            domains: vec![],
+            suffixes: vec![],
+        });
+        let toml = document.to_toml().unwrap();
+        assert_eq!(PolicyDocument::parse(&toml).unwrap(), document, "{toml}");
+    }
+
+    #[test]
+    fn downloaded_lists_load_through_the_artifact_loader() {
+        let mut document = PolicyDocument::default();
+        document.lists.push(ListDef {
+            id: "remote".into(),
+            name: None,
+            action: RuleAction::Deny,
+            enabled: true,
+            url: Some("https://lists.example/hosts".into()),
+            format: Some(ListFormat::Hosts),
+            refresh_seconds: 3600,
+            artifact_sha256: Some("hash".into()),
+            groups: vec![],
+            domains: vec![],
+            suffixes: vec![],
+        });
+        let missing = CompiledPolicy::compile("rev", &document, SystemTime::now(), None);
+        assert!(matches!(
+            missing,
+            Err(PolicyError::ArtifactUnavailable { .. })
+        ));
+
+        let loader = |sha256: &str| {
+            assert_eq!(sha256, "hash");
+            Ok(b"e ads.example\n".to_vec())
+        };
+        let policy =
+            CompiledPolicy::compile_with("rev", &document, SystemTime::now(), None, &loader)
+                .unwrap();
+        assert!(blocked(&policy, "10.0.0.1", "ads.example"));
+
+        document.lists[0].enabled = false;
+        let disabled = CompiledPolicy::compile("rev", &document, SystemTime::now(), None).unwrap();
+        assert!(!blocked(&disabled, "10.0.0.1", "ads.example"));
     }
 
     #[test]
@@ -750,7 +1050,10 @@ groups = ["typo"]
         );
         assert!(matches!(
             policy.check_answer(source, &name("a.example"), &[name("x.ads.example")]),
-            Verdict::Block(_)
+            Verdict::BlockTarget {
+                target_index: 0,
+                ..
+            }
         ));
         assert!(matches!(
             policy.check_answer(source, &name("x.ads.example"), &[]),

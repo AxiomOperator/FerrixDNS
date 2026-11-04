@@ -12,15 +12,20 @@ use std::time::Duration;
 use dns_upstreams::{PoolConfig, UpstreamPool};
 use hickory_server::Server;
 use ipnet::IpNet;
+use socket2::SockRef;
 use tokio::net::{TcpListener, UdpSocket};
-use tracing::info;
+use tracing::{debug, info};
 
 pub use handler::ForwardHandler;
-pub use policy::{PolicyHandle, PolicyLoadError, PolicyManager, empty_policy};
+pub use policy::{
+    MutationError, PolicyExport, PolicyHandle, PolicyLoadError, PolicyManager, RevisionInfo,
+    RevisionNotFound, empty_policy,
+};
 
 const TCP_IDLE_TIMEOUT: Duration = Duration::from_secs(10);
 const TCP_RESPONSE_BUFFER: usize = 32;
 const PORT_ZERO_RETRIES: u32 = 32;
+const UDP_RECEIVE_BUFFER: usize = 8 * 1024 * 1024;
 
 /// Settings for the DNS listeners and request path.
 #[derive(Clone)]
@@ -34,6 +39,18 @@ pub struct RuntimeConfig {
     pub max_concurrent_requests: usize,
     /// The active policy, which can be replaced while the server runs.
     pub policy: PolicyHandle,
+    /// Where query events go. Without it, nothing is recorded.
+    pub telemetry: Option<Arc<dns_telemetry::Telemetry>>,
+    /// The answer cache. Without it, every query goes upstream.
+    pub cache: Option<Arc<dns_cache::DnsCache>>,
+    /// Validate answers with DNSSEC, using these trust anchors, or the root's if none are given.
+    pub dnssec: Option<DnssecConfig>,
+}
+
+/// Turns on DNSSEC validation.
+#[derive(Clone, Default)]
+pub struct DnssecConfig {
+    pub trust_anchors: Option<dns_upstreams::TrustAnchors>,
 }
 
 /// The networks served by default: loopback, private and link-local addresses.
@@ -83,6 +100,11 @@ pub async fn bind_udp_and_tcp(address: SocketAddr) -> io::Result<(UdpSocket, Tcp
         let socket = UdpSocket::bind(address)
             .await
             .map_err(|error| bind_error("UDP", address, error))?;
+        // Bursts arrive faster than one socket can be drained. The kernel caps this at
+        // net.core.rmem_max, so a failure or a smaller buffer isn't an error.
+        if let Err(error) = SockRef::from(&socket).set_recv_buffer_size(UDP_RECEIVE_BUFFER) {
+            debug!(%error, "could not enlarge the UDP receive buffer");
+        }
         let local = socket.local_addr()?;
         match TcpListener::bind(local).await {
             Ok(listener) => return Ok((socket, listener)),
@@ -96,13 +118,28 @@ pub async fn bind_udp_and_tcp(address: SocketAddr) -> io::Result<(UdpSocket, Tcp
 pub struct DnsServer {
     server: Server<ForwardHandler>,
     local_addrs: Vec<SocketAddr>,
+    pool: Arc<UpstreamPool>,
 }
 
 impl DnsServer {
     /// Binds every listener over UDP and TCP. Port 0 picks one free port for both.
     pub async fn bind(config: RuntimeConfig) -> io::Result<Self> {
-        let pool = Arc::new(UpstreamPool::new(config.upstreams));
-        let handler = ForwardHandler::new(pool, config.max_concurrent_requests, config.policy);
+        let pool = Arc::new(UpstreamPool::new(config.upstreams).map_err(io::Error::other)?);
+        let validator = config.dnssec.map(|dnssec| {
+            dns_upstreams::DnssecValidator::new(
+                Arc::clone(&pool),
+                config.cache.clone(),
+                dnssec.trust_anchors,
+            )
+        });
+        let handler = ForwardHandler::new(
+            Arc::clone(&pool),
+            config.max_concurrent_requests,
+            config.policy,
+            config.telemetry,
+            config.cache,
+            validator,
+        );
         // Allowed networks only take effect where a deny matches, so deny everything first.
         let mut server = Server::with_access(handler, deny_everything(), config.allow);
 
@@ -118,12 +155,18 @@ impl DnsServer {
         Ok(Self {
             server,
             local_addrs,
+            pool,
         })
     }
 
     /// The bound addresses, useful when a listener asked for port 0.
     pub fn local_addrs(&self) -> &[SocketAddr] {
         &self.local_addrs
+    }
+
+    /// The upstream pool, for health reporting.
+    pub fn pool(&self) -> Arc<UpstreamPool> {
+        Arc::clone(&self.pool)
     }
 
     /// Serves until `shutdown` completes or a listener fails.

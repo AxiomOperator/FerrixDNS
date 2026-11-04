@@ -4,12 +4,18 @@
 //! are written with write, fsync and atomic rename, so a crash leaves either the old state or the
 //! new one, and a corrupt revision is detected by its checksum and skipped.
 
+mod artifacts;
+mod config_db;
+
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 use tracing::warn;
+
+pub use artifacts::ArtifactStore;
+pub use config_db::{AuditEvent, ConfigDb, ConfigDbError, ListStatus, Session, User};
 
 /// Revisions kept: the active one plus the previous two known-good revisions.
 pub const RETAINED_REVISIONS: usize = 3;

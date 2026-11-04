@@ -1,6 +1,6 @@
 [package]
 name = "dns-storage"
-description = "Durable, checksummed storage for node policy revisions."
+description = "Durable node storage: policy revisions, list artifacts and the config database."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,10 +8,13 @@ publish.workspace = true
 
 [dependencies]
 sha2.workspace = true
+sqlx.workspace = true
+thiserror.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+tokio.workspace = true
 
 [lints]
 workspace = true

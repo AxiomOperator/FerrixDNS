@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use dns_runtime::{DnsServer, PolicyHandle, RuntimeConfig, empty_policy};
-use dns_upstreams::PoolConfig;
+use dns_upstreams::{PoolConfig, UpstreamServer};
 use hickory_proto::op::{Edns, Message, MessageType, OpCode, Query, ResponseCode};
 use hickory_proto::rr::rdata::svcb::SVCB;
 use hickory_proto::rr::rdata::{A, AAAA, CNAME, HTTPS, MX, PTR, SOA, SRV, TXT};
@@ -308,27 +308,159 @@ fn first_label(query: &Message) -> String {
         .unwrap_or_default()
 }
 
+/// A self-signed certificate for a DNS name, as a server's chain and key plus a trust root.
+pub struct TestCertificate {
+    pub trust_root: Vec<u8>,
+    pub server_config: rustls::ServerConfig,
+}
+
+pub fn test_certificate(name: &str, alpn: &[&[u8]]) -> TestCertificate {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let certified = rcgen::generate_simple_self_signed(vec![name.to_owned()]).unwrap();
+    let der = certified.cert.der().clone();
+    let key =
+        rustls::pki_types::PrivateKeyDer::try_from(certified.signing_key.serialize_der()).unwrap();
+    let mut server_config = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(vec![der.clone()], key)
+        .unwrap();
+    server_config.alpn_protocols = alpn.iter().map(|protocol| protocol.to_vec()).collect();
+    TestCertificate {
+        trust_root: der.to_vec(),
+        server_config,
+    }
+}
+
+impl Fixture {
+    /// Serves this fixture over DNS over TLS.
+    pub async fn serve_tls(&self, certificate: TestCertificate) -> SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(certificate.server_config));
+        let fixture = self.clone();
+        tokio::spawn(async move {
+            loop {
+                let (stream, _) = listener.accept().await.unwrap();
+                let (acceptor, fixture) = (acceptor.clone(), fixture.clone());
+                tokio::spawn(async move {
+                    // A client that rejects the certificate fails the handshake here.
+                    let Ok(mut stream) = acceptor.accept(stream).await else {
+                        return;
+                    };
+                    // One connection can carry many queries.
+                    while let Ok(length) = stream.read_u16().await {
+                        let mut buffer = vec![0_u8; usize::from(length)];
+                        if stream.read_exact(&mut buffer).await.is_err() {
+                            return;
+                        }
+                        let query = Message::from_vec(&buffer).unwrap();
+                        fixture.tcp_queries.fetch_add(1, Ordering::SeqCst);
+                        let Some(response) = fixture.respond(&query) else {
+                            return;
+                        };
+                        let bytes = response.to_vec().unwrap();
+                        stream
+                            .write_u16(u16::try_from(bytes.len()).unwrap())
+                            .await
+                            .unwrap();
+                        stream.write_all(&bytes).await.unwrap();
+                        stream.flush().await.unwrap();
+                    }
+                });
+            }
+        });
+        address
+    }
+
+    /// Serves this fixture over DNS over HTTPS, using HTTP/1.1.
+    pub async fn serve_https(&self, certificate: TestCertificate) -> SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(certificate.server_config));
+        let fixture = self.clone();
+        tokio::spawn(async move {
+            loop {
+                let (stream, _) = listener.accept().await.unwrap();
+                let (acceptor, fixture) = (acceptor.clone(), fixture.clone());
+                tokio::spawn(async move {
+                    let Ok(mut stream) = acceptor.accept(stream).await else {
+                        return;
+                    };
+                    let mut received = Vec::new();
+                    let mut chunk = [0_u8; 4096];
+                    let (headers_end, content_length) = loop {
+                        let Ok(count) = stream.read(&mut chunk).await else {
+                            return;
+                        };
+                        if count == 0 {
+                            return;
+                        }
+                        received.extend_from_slice(&chunk[..count]);
+                        if let Some(end) = received.windows(4).position(|w| w == b"\r\n\r\n") {
+                            let headers =
+                                String::from_utf8_lossy(&received[..end]).to_ascii_lowercase();
+                            assert!(headers.starts_with("post /dns-query "), "{headers}");
+                            assert!(headers.contains("content-type: application/dns-message"));
+                            let length = headers
+                                .lines()
+                                .find_map(|line| line.strip_prefix("content-length: "))
+                                .unwrap()
+                                .trim()
+                                .parse::<usize>()
+                                .unwrap();
+                            break (end + 4, length);
+                        }
+                    };
+                    while received.len() < headers_end + content_length {
+                        let count = stream.read(&mut chunk).await.unwrap();
+                        received.extend_from_slice(&chunk[..count]);
+                    }
+                    let query = Message::from_vec(&received[headers_end..]).unwrap();
+                    assert_eq!(query.metadata.id, 0, "RFC 8484 recommends ID 0");
+                    fixture.tcp_queries.fetch_add(1, Ordering::SeqCst);
+                    let bytes = fixture.respond(&query).unwrap().to_vec().unwrap();
+                    let head = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/dns-message\r\n\
+                         Content-Length: {}\r\nConnection: close\r\n\r\n",
+                        bytes.len()
+                    );
+                    stream.write_all(head.as_bytes()).await.unwrap();
+                    stream.write_all(&bytes).await.unwrap();
+                    stream.shutdown().await.unwrap();
+                });
+            }
+        });
+        address
+    }
+}
+
 /// Options for starting the server under test.
 pub struct ServerOptions {
-    pub upstreams: Vec<SocketAddr>,
+    pub upstreams: Vec<UpstreamServer>,
+    pub trust_roots: Option<Vec<Vec<u8>>>,
+    pub dnssec: Option<dns_runtime::DnssecConfig>,
     pub allow: Vec<IpNet>,
     pub max_concurrent_requests: usize,
     pub attempt_timeout: Duration,
     pub total_timeout: Duration,
     pub rounds: u32,
     pub policy: PolicyHandle,
+    pub cache: Option<Arc<dns_cache::DnsCache>>,
 }
 
 impl ServerOptions {
     pub fn new(upstreams: Vec<SocketAddr>) -> Self {
         Self {
-            upstreams,
+            upstreams: upstreams.into_iter().map(UpstreamServer::from).collect(),
+            trust_roots: None,
+            dnssec: None,
             allow: dns_runtime::default_allow(),
             max_concurrent_requests: 1024,
             attempt_timeout: Duration::from_millis(200),
             total_timeout: Duration::from_millis(1000),
             rounds: 1,
             policy: empty_policy(),
+            cache: None,
         }
     }
 }
@@ -340,12 +472,16 @@ pub async fn start_server(options: ServerOptions) -> SocketAddr {
         allow: options.allow,
         upstreams: PoolConfig {
             servers: options.upstreams,
+            trust_roots: options.trust_roots,
             attempt_timeout: options.attempt_timeout,
             total_timeout: options.total_timeout,
             rounds: options.rounds,
         },
         max_concurrent_requests: options.max_concurrent_requests,
         policy: options.policy,
+        telemetry: None,
+        cache: options.cache,
+        dnssec: options.dnssec,
     })
     .await
     .unwrap();

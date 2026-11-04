@@ -38,6 +38,14 @@ API and `config.db`:
 - If a valid policy can't be persisted, for example on a full disk, it still activates and an error
   is logged, because DNS must keep working (FR-010).
 
+The API works the same way: each change validates, compiles and durably stores a new revision before
+it publishes and returns. A policy file makes the API read-only, so the file and the dashboard can't
+disagree about which one is authoritative.
+
+Table projections aren't implemented, because nothing reads them yet. Policy lives only in revision
+files, and `config.db` holds accounts, sessions, list fetch state and the audit log. A downloaded
+list's content is pinned in the revision by hash, so a rollback restores exactly what was enforced.
+
 ## Consequences
 
 - A success response means the change is active on that node.

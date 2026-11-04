@@ -1,0 +1,31 @@
+# Builds .deb and .rpm packages. Run from the repository root, after a release build:
+#   ARCH=amd64 VERSION=0.0.1 nfpm package --config packaging/nfpm.yaml --packager deb --target dist/
+name: ferrixdns
+arch: ${ARCH}
+platform: linux
+version: ${VERSION}
+section: net
+priority: optional
+maintainer: FerrixDNS contributors
+description: |
+  Self-hostable DNS filtering and management, with a web dashboard.
+homepage: https://github.com/AxiomOperator/FerrixDNS
+depends:
+  - ca-certificates
+contents:
+  - src: target/release/fx
+    dst: /usr/bin/fx
+    file_info:
+      mode: 0755
+  - src: packaging/systemd/ferrixdns.service
+    dst: /usr/lib/systemd/system/ferrixdns.service
+    file_info:
+      mode: 0644
+  - src: packaging/systemd/ferrixdns.env
+    dst: /etc/ferrixdns/ferrixdns.env
+    type: config|noreplace
+    file_info:
+      mode: 0640
+scripts:
+  postinstall: packaging/scripts/postinstall.sh
+  preremove: packaging/scripts/preremove.sh

@@ -28,6 +28,12 @@ With one database, query-log growth or corruption could block config commits or 
 booting. At 10,000 QPS, 7 days is about 6 billion rows, so a single ever-growing table can't be the
 default design.
 
+## Current implementation
+
+Policy revisions and list artifacts are files, as in ADR-012. `config.db` holds accounts, sessions, list
+fetch state and the audit log. Compiled indexes are built at boot rather than stored, which took 0.66 s
+for a 1M-entry list on the test machine.
+
 ## Consequences
 
 - There are no foreign keys across stores, so references from telemetry are soft.
