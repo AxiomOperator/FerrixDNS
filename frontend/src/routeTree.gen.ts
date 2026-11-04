@@ -15,10 +15,12 @@ import { Route as SetupRouteImport } from './routes/setup'
 import { Route as AuthenticatedIndexRouteImport } from './routes/_authenticated.index'
 import { Route as AuthenticatedClientsRouteImport } from './routes/_authenticated.clients'
 import { Route as AuthenticatedGroupsRouteImport } from './routes/_authenticated.groups'
+import { Route as AuthenticatedNetworkRouteImport } from './routes/_authenticated.network'
 import { Route as AuthenticatedQueriesRouteImport } from './routes/_authenticated.queries'
 import { Route as AuthenticatedSettingsRouteImport } from './routes/_authenticated.settings'
 import { Route as AuthenticatedSystemRouteImport } from './routes/_authenticated.system'
 import { Route as AuthenticatedDnsCacheRouteImport } from './routes/_authenticated.dns.cache'
+import { Route as AuthenticatedDnsForwardersRouteImport } from './routes/_authenticated.dns.forwarders'
 import { Route as AuthenticatedDnsRecordsRouteImport } from './routes/_authenticated.dns.records'
 import { Route as AuthenticatedDnsUpstreamsRouteImport } from './routes/_authenticated.dns.upstreams'
 import { Route as AuthenticatedFilteringListsRouteImport } from './routes/_authenticated.filtering.lists'
@@ -53,6 +55,11 @@ const AuthenticatedGroupsRoute = AuthenticatedGroupsRouteImport.update({
   path: '/groups',
   getParentRoute: () => AuthenticatedRoute,
 } as any)
+const AuthenticatedNetworkRoute = AuthenticatedNetworkRouteImport.update({
+  id: '/network',
+  path: '/network',
+  getParentRoute: () => AuthenticatedRoute,
+} as any)
 const AuthenticatedQueriesRoute = AuthenticatedQueriesRouteImport.update({
   id: '/queries',
   path: '/queries',
@@ -73,6 +80,12 @@ const AuthenticatedDnsCacheRoute = AuthenticatedDnsCacheRouteImport.update({
   path: '/dns/cache',
   getParentRoute: () => AuthenticatedRoute,
 } as any)
+const AuthenticatedDnsForwardersRoute =
+  AuthenticatedDnsForwardersRouteImport.update({
+    id: '/dns/forwarders',
+    path: '/dns/forwarders',
+    getParentRoute: () => AuthenticatedRoute,
+  } as any)
 const AuthenticatedDnsRecordsRoute = AuthenticatedDnsRecordsRouteImport.update({
   id: '/dns/records',
   path: '/dns/records',
@@ -103,10 +116,12 @@ export interface FileRoutesByFullPath {
   '/setup': typeof SetupRoute
   '/clients': typeof AuthenticatedClientsRoute
   '/groups': typeof AuthenticatedGroupsRoute
+  '/network': typeof AuthenticatedNetworkRoute
   '/queries': typeof AuthenticatedQueriesRoute
   '/settings': typeof AuthenticatedSettingsRoute
   '/system': typeof AuthenticatedSystemRoute
   '/dns/cache': typeof AuthenticatedDnsCacheRoute
+  '/dns/forwarders': typeof AuthenticatedDnsForwardersRoute
   '/dns/records': typeof AuthenticatedDnsRecordsRoute
   '/dns/upstreams': typeof AuthenticatedDnsUpstreamsRoute
   '/filtering/lists': typeof AuthenticatedFilteringListsRoute
@@ -117,11 +132,13 @@ export interface FileRoutesByTo {
   '/setup': typeof SetupRoute
   '/clients': typeof AuthenticatedClientsRoute
   '/groups': typeof AuthenticatedGroupsRoute
+  '/network': typeof AuthenticatedNetworkRoute
   '/queries': typeof AuthenticatedQueriesRoute
   '/settings': typeof AuthenticatedSettingsRoute
   '/system': typeof AuthenticatedSystemRoute
   '/': typeof AuthenticatedIndexRoute
   '/dns/cache': typeof AuthenticatedDnsCacheRoute
+  '/dns/forwarders': typeof AuthenticatedDnsForwardersRoute
   '/dns/records': typeof AuthenticatedDnsRecordsRoute
   '/dns/upstreams': typeof AuthenticatedDnsUpstreamsRoute
   '/filtering/lists': typeof AuthenticatedFilteringListsRoute
@@ -134,11 +151,13 @@ export interface FileRoutesById {
   '/setup': typeof SetupRoute
   '/_authenticated/clients': typeof AuthenticatedClientsRoute
   '/_authenticated/groups': typeof AuthenticatedGroupsRoute
+  '/_authenticated/network': typeof AuthenticatedNetworkRoute
   '/_authenticated/queries': typeof AuthenticatedQueriesRoute
   '/_authenticated/settings': typeof AuthenticatedSettingsRoute
   '/_authenticated/system': typeof AuthenticatedSystemRoute
   '/_authenticated/': typeof AuthenticatedIndexRoute
   '/_authenticated/dns/cache': typeof AuthenticatedDnsCacheRoute
+  '/_authenticated/dns/forwarders': typeof AuthenticatedDnsForwardersRoute
   '/_authenticated/dns/records': typeof AuthenticatedDnsRecordsRoute
   '/_authenticated/dns/upstreams': typeof AuthenticatedDnsUpstreamsRoute
   '/_authenticated/filtering/lists': typeof AuthenticatedFilteringListsRoute
@@ -152,10 +171,12 @@ export interface FileRouteTypes {
     | '/setup'
     | '/clients'
     | '/groups'
+    | '/network'
     | '/queries'
     | '/settings'
     | '/system'
     | '/dns/cache'
+    | '/dns/forwarders'
     | '/dns/records'
     | '/dns/upstreams'
     | '/filtering/lists'
@@ -166,11 +187,13 @@ export interface FileRouteTypes {
     | '/setup'
     | '/clients'
     | '/groups'
+    | '/network'
     | '/queries'
     | '/settings'
     | '/system'
     | '/'
     | '/dns/cache'
+    | '/dns/forwarders'
     | '/dns/records'
     | '/dns/upstreams'
     | '/filtering/lists'
@@ -182,11 +205,13 @@ export interface FileRouteTypes {
     | '/setup'
     | '/_authenticated/clients'
     | '/_authenticated/groups'
+    | '/_authenticated/network'
     | '/_authenticated/queries'
     | '/_authenticated/settings'
     | '/_authenticated/system'
     | '/_authenticated/'
     | '/_authenticated/dns/cache'
+    | '/_authenticated/dns/forwarders'
     | '/_authenticated/dns/records'
     | '/_authenticated/dns/upstreams'
     | '/_authenticated/filtering/lists'
@@ -243,6 +268,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedGroupsRouteImport
       parentRoute: typeof AuthenticatedRoute
     }
+    '/_authenticated/network': {
+      id: '/_authenticated/network'
+      path: '/network'
+      fullPath: '/network'
+      preLoaderRoute: typeof AuthenticatedNetworkRouteImport
+      parentRoute: typeof AuthenticatedRoute
+    }
     '/_authenticated/queries': {
       id: '/_authenticated/queries'
       path: '/queries'
@@ -269,6 +301,13 @@ declare module '@tanstack/react-router' {
       path: '/dns/cache'
       fullPath: '/dns/cache'
       preLoaderRoute: typeof AuthenticatedDnsCacheRouteImport
+      parentRoute: typeof AuthenticatedRoute
+    }
+    '/_authenticated/dns/forwarders': {
+      id: '/_authenticated/dns/forwarders'
+      path: '/dns/forwarders'
+      fullPath: '/dns/forwarders'
+      preLoaderRoute: typeof AuthenticatedDnsForwardersRouteImport
       parentRoute: typeof AuthenticatedRoute
     }
     '/_authenticated/dns/records': {
@@ -305,11 +344,13 @@ declare module '@tanstack/react-router' {
 interface AuthenticatedRouteChildren {
   AuthenticatedClientsRoute: typeof AuthenticatedClientsRoute
   AuthenticatedGroupsRoute: typeof AuthenticatedGroupsRoute
+  AuthenticatedNetworkRoute: typeof AuthenticatedNetworkRoute
   AuthenticatedQueriesRoute: typeof AuthenticatedQueriesRoute
   AuthenticatedSettingsRoute: typeof AuthenticatedSettingsRoute
   AuthenticatedSystemRoute: typeof AuthenticatedSystemRoute
   AuthenticatedIndexRoute: typeof AuthenticatedIndexRoute
   AuthenticatedDnsCacheRoute: typeof AuthenticatedDnsCacheRoute
+  AuthenticatedDnsForwardersRoute: typeof AuthenticatedDnsForwardersRoute
   AuthenticatedDnsRecordsRoute: typeof AuthenticatedDnsRecordsRoute
   AuthenticatedDnsUpstreamsRoute: typeof AuthenticatedDnsUpstreamsRoute
   AuthenticatedFilteringListsRoute: typeof AuthenticatedFilteringListsRoute
@@ -319,11 +360,13 @@ interface AuthenticatedRouteChildren {
 const AuthenticatedRouteChildren: AuthenticatedRouteChildren = {
   AuthenticatedClientsRoute: AuthenticatedClientsRoute,
   AuthenticatedGroupsRoute: AuthenticatedGroupsRoute,
+  AuthenticatedNetworkRoute: AuthenticatedNetworkRoute,
   AuthenticatedQueriesRoute: AuthenticatedQueriesRoute,
   AuthenticatedSettingsRoute: AuthenticatedSettingsRoute,
   AuthenticatedSystemRoute: AuthenticatedSystemRoute,
   AuthenticatedIndexRoute: AuthenticatedIndexRoute,
   AuthenticatedDnsCacheRoute: AuthenticatedDnsCacheRoute,
+  AuthenticatedDnsForwardersRoute: AuthenticatedDnsForwardersRoute,
   AuthenticatedDnsRecordsRoute: AuthenticatedDnsRecordsRoute,
   AuthenticatedDnsUpstreamsRoute: AuthenticatedDnsUpstreamsRoute,
   AuthenticatedFilteringListsRoute: AuthenticatedFilteringListsRoute,

@@ -14,27 +14,9 @@ use tracing::info;
 const SELF_SIGNED_CERT: &str = "tls/self-signed-cert.pem";
 const SELF_SIGNED_KEY: &str = "tls/self-signed-key.pem";
 
-fn server_config(
-    chain: Vec<CertificateDer<'static>>,
-    key: PrivateKeyDer<'static>,
-) -> Result<Arc<ServerConfig>> {
-    let _ = rustls::crypto::ring::default_provider().install_default();
-    let mut config = ServerConfig::builder()
-        .with_no_client_auth()
-        .with_single_cert(chain, key)
-        .context("the TLS certificate and key can't be used together")?;
-    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
-    Ok(Arc::new(config))
-}
-
 /// Loads an operator's certificate chain and private key.
 pub fn from_files(cert: &Path, key: &Path) -> Result<Arc<ServerConfig>> {
-    let chain = CertificateDer::pem_file_iter(cert)
-        .and_then(Iterator::collect::<Result<Vec<_>, _>>)
-        .with_context(|| format!("cannot read the certificate {}", cert.display()))?;
-    let key = PrivateKeyDer::from_pem_file(key)
-        .with_context(|| format!("cannot read the private key {}", key.display()))?;
-    server_config(chain, key)
+    node_api::load_tls_files(cert, key).map_err(anyhow::Error::msg)
 }
 
 /// Loads the node's self-signed certificate, creating it the first time.
@@ -78,7 +60,7 @@ pub fn self_signed(state_dir: &Path, names: &[String]) -> Result<Arc<ServerConfi
     }
     let key = PrivateKeyDer::from_pem_file(&key_path)
         .with_context(|| format!("cannot read {}", key_path.display()))?;
-    server_config(chain, key)
+    node_api::tls_server_config(chain, key).map_err(anyhow::Error::msg)
 }
 
 fn write_private(path: &Path, content: &[u8]) -> Result<()> {

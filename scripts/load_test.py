@@ -13,9 +13,11 @@ import json
 import os
 import platform
 import re
+import resource
 import shutil
 import socket
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -26,6 +28,10 @@ ROOT = Path(__file__).resolve().parent.parent
 FX = ROOT / "target/release/ferrixdns"
 DNSLOAD = ROOT / "target/release/dnsload"
 PASSWORD = "load test password"
+OVERLOAD_CLIENTS = 6000
+OPEN_FILES_SPARE = 200
+# The installed service runs with LimitNOFILE=65536, so this matches it.
+OPEN_FILES_WANTED = 65536
 
 
 def free_port():
@@ -138,12 +144,29 @@ class Node:
         self.process.wait(timeout=20)
 
 
+def raise_open_file_limit():
+    """The overload stage opens a socket per client, which is more than most shells allow."""
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    wanted = OPEN_FILES_WANTED if hard == resource.RLIM_INFINITY else min(hard, OPEN_FILES_WANTED)
+    if wanted < OVERLOAD_CLIENTS + OPEN_FILES_SPARE:
+        sys.exit(
+            f"The overload stage needs {OVERLOAD_CLIENTS + OPEN_FILES_SPARE:,} open files, but this "
+            f"shell's hard limit is {hard:,}. Raise it with: ulimit -Hn {OPEN_FILES_WANTED}"
+        )
+    if soft == resource.RLIM_INFINITY or soft >= wanted:
+        return
+    # Child processes inherit this.
+    resource.setrlimit(resource.RLIMIT_NOFILE, (wanted, hard))
+
+
 def load(node, seconds, **options):
     arguments = [str(DNSLOAD), "run", "--server", f"127.0.0.1:{node.dns_port}", "--seconds", str(seconds)]
     for key, value in options.items():
         arguments += [f"--{key.replace('_', '-')}", str(value)]
-    output = subprocess.run(arguments, capture_output=True, text=True, check=True).stdout
-    return json.loads(output)
+    finished = subprocess.run(arguments, capture_output=True, text=True)
+    if finished.returncode != 0:
+        sys.exit(f"dnsload failed: {finished.stderr.strip()}")
+    return json.loads(finished.stdout)
 
 
 def report(name, result, node):
@@ -160,6 +183,7 @@ def main():
     parser.add_argument("--list-size", type=int, default=1_000_000)
     parser.add_argument("--seconds", type=int, default=10)
     args = parser.parse_args()
+    raise_open_file_limit()
 
     subprocess.run(
         ["cargo", "build", "--release", "-q", "-p", "node-bin", "-p", "performance"],
@@ -178,6 +202,7 @@ def main():
         ),
     ]
     time.sleep(0.2)
+    node = None
     try:
         artifact_bytes = write_state(work / "state", args.list_size)
         print(f"Blocklist: {args.list_size:,} entries, {artifact_bytes / 1_048_576:.0f} MiB artifact.")
@@ -235,6 +260,8 @@ def main():
         )
         stop.set()
         toggler.join()
+        # Toggling can stop either way, and later stages need the list on.
+        node.patch("/lists/generated", {"enabled": True})
 
         system = node.system()
         print(
@@ -251,7 +278,7 @@ def main():
 
         print("\nOverload: a 500 ms upstream, more demand than the 4,096 in-flight limit.")
         node = Node(work / "state", slow_port, cache_mib=0)
-        result = load(node, args.seconds, clients=6000, repeat_percent=0, timeout_ms=3000, **common)
+        result = load(node, args.seconds, clients=OVERLOAD_CLIENTS, repeat_percent=0, timeout_ms=3000, **common)
         threads, fds = node.threads_and_fds()
         report("Flood during slow upstream", result, node)
         print(f"After the flood: {threads} threads, {fds} open files.")
@@ -259,6 +286,9 @@ def main():
         print(f"Blocked queries during recovery: {healthy['nxdomain']:,} answered, {healthy['timeouts']} timed out.")
         node.stop()
     finally:
+        # A failed stage must not leave a node running.
+        if node is not None:
+            node.stop()
         for helper in helpers:
             helper.kill()
         shutil.rmtree(work, ignore_errors=True)

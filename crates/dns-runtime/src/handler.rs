@@ -4,8 +4,9 @@ use std::time::{Instant, SystemTime};
 
 use dns_cache::{CacheKey, DnsCache};
 use dns_policy::{
-    BlockConfig, BlockResponse, Decision, DecisionSource, DomainName, LOCAL_NEGATIVE_TTL_SECONDS,
-    LocalAnswer, LocalData, LocalQuery, LocalRecord, Verdict,
+    BlockConfig, BlockResponse, ClientSource, Decision, DecisionSource, DomainName, Filtering,
+    LOCAL_NEGATIVE_TTL_SECONDS, LocalAnswer, LocalData, LocalQuery, LocalRecord, QueryLogMode,
+    Verdict,
 };
 use dns_telemetry::{Outcome, QueryEvent, Telemetry};
 use dns_upstreams::{
@@ -23,7 +24,10 @@ use hickory_server::zone_handler::MessageResponseBuilder;
 use tokio::sync::Semaphore;
 use tracing::{debug, warn};
 
+use crate::Services;
+use crate::devices::DeviceInfo;
 use crate::policy::PolicyHandle;
+use crate::rate_limit::RateDecision;
 
 /// EDNS option code for Extended DNS Errors (RFC 8914).
 const EDE_OPTION_CODE: u16 = 15;
@@ -40,6 +44,37 @@ pub struct ForwardHandler {
     telemetry: Option<Arc<Telemetry>>,
     cache: Option<Arc<DnsCache>>,
     validator: Option<DnssecValidator>,
+    services: Services,
+}
+
+/// What a handler is built from.
+pub(crate) struct HandlerConfig {
+    pub pool: Arc<UpstreamPool>,
+    pub max_concurrent_requests: usize,
+    pub policy: PolicyHandle,
+    pub telemetry: Option<Arc<Telemetry>>,
+    pub cache: Option<Arc<DnsCache>>,
+    pub validator: Option<DnssecValidator>,
+    pub services: Services,
+}
+
+/// Who sent a query.
+struct Caller {
+    address: IpAddr,
+    device: Option<Arc<DeviceInfo>>,
+}
+
+impl Caller {
+    fn source(&self) -> ClientSource<'_> {
+        ClientSource {
+            address: self.address,
+            mac: self.device.as_ref().and_then(|device| device.mac),
+            hostname: self
+                .device
+                .as_ref()
+                .and_then(|device| device.hostname.as_ref()),
+        }
+    }
 }
 
 /// Why a query was blocked, owned so it can outlive the policy snapshot.
@@ -71,6 +106,8 @@ struct Finished {
     outcome: Outcome,
     reason: BlockReason,
     upstream: Option<String>,
+    /// False for rate-limited queries that have already been reported recently.
+    recorded: bool,
 }
 
 impl Finished {
@@ -80,12 +117,14 @@ impl Finished {
             outcome,
             reason: BlockReason::default(),
             upstream: None,
+            recorded: true,
         }
     }
 }
 
 /// How an upstream answer was obtained, and what the client asked for.
-struct AnswerMeta {
+struct AnswerMeta<'a> {
+    caller: &'a Caller,
     dnssec_ok: bool,
     /// Whether this node validated the answer with DNSSEC.
     validated: bool,
@@ -100,28 +139,78 @@ enum AnswerAction {
 }
 
 impl ForwardHandler {
-    pub fn new(
-        pool: Arc<UpstreamPool>,
-        max_concurrent_requests: usize,
-        policy: PolicyHandle,
-        telemetry: Option<Arc<Telemetry>>,
-        cache: Option<Arc<DnsCache>>,
-        validator: Option<DnssecValidator>,
-    ) -> Self {
+    pub(crate) fn new(config: HandlerConfig) -> Self {
         Self {
-            pool,
-            permits: Semaphore::new(max_concurrent_requests),
-            policy,
-            telemetry,
-            cache,
-            validator,
+            pool: config.pool,
+            permits: Semaphore::new(config.max_concurrent_requests),
+            policy: config.policy,
+            telemetry: config.telemetry,
+            cache: config.cache,
+            validator: config.validator,
+            services: config.services,
         }
     }
 
-    /// Checks a query name, returning how to answer if it's blocked.
-    fn query_block(&self, source: IpAddr, name: &DomainName) -> Option<(BlockConfig, BlockReason)> {
+    fn filtering(&self) -> Filtering {
+        if self.services.pause.is_active() {
+            Filtering::EmergencyOnly
+        } else {
+            Filtering::Normal
+        }
+    }
+
+    /// Finds out who's asking. A query only waits for this when policy depends on the answer.
+    async fn caller(&self, address: IpAddr) -> Caller {
+        let address = address.to_canonical();
+        let devices = &self.services.devices;
+        let device = match devices.get(address) {
+            Some(device) => Some(device),
+            None if self.policy.load().needs_device(address) => devices.identify(address).await,
+            None => {
+                devices.observe(address);
+                None
+            }
+        };
+        Caller { address, device }
+    }
+
+    /// Refuses a client that's over its limit. This comes first, so floods stay cheap.
+    async fn rate_limited<R: ResponseHandler>(
+        &self,
+        request: &Request,
+        response_handle: &R,
+    ) -> Option<Finished> {
+        let address = request.src().ip().to_canonical();
         let policy = self.policy.load();
-        match policy.check_query(source, name) {
+        let limit = policy.rate_limit_for(address)?;
+        let RateDecision::Limited { report } = self.services.rate_limiter.check(address, limit)
+        else {
+            return None;
+        };
+        if report {
+            // Addresses are only logged where the operator has chosen to keep them.
+            if policy.telemetry().mode == QueryLogMode::Full {
+                warn!(client = %address, limit, "a client is over its query limit");
+            } else {
+                warn!(limit, "a client is over its query limit");
+            }
+        }
+        drop(policy);
+        let info = send_error(request, ResponseCode::Refused, response_handle.clone()).await;
+        Some(Finished {
+            recorded: report,
+            ..Finished::plain(info, Outcome::RateLimited)
+        })
+    }
+
+    /// Checks a query name, returning how to answer if it's blocked.
+    fn query_block(
+        &self,
+        caller: &Caller,
+        name: &DomainName,
+    ) -> Option<(BlockConfig, BlockReason)> {
+        let policy = self.policy.load();
+        match policy.check_query_with(self.filtering(), caller.source(), name) {
             Verdict::Allow | Verdict::ChainTooDeep | Verdict::BlockTarget { .. } => None,
             Verdict::Block(decision) => {
                 debug!(name = name.as_str(), ?decision, "blocked query");
@@ -133,12 +222,12 @@ impl ForwardHandler {
     /// Checks an upstream answer against the policy active now, not when the query arrived.
     fn answer_action(
         &self,
-        source: IpAddr,
+        caller: &Caller,
         name: &DomainName,
         targets: &[DomainName],
     ) -> AnswerAction {
         let policy = self.policy.load();
-        match policy.check_answer(source, name, targets) {
+        match policy.check_answer_with(self.filtering(), caller.source(), name, targets) {
             Verdict::Allow => AnswerAction::Return,
             Verdict::Block(decision) => {
                 debug!(name = name.as_str(), ?decision, "blocked answer");
@@ -160,6 +249,9 @@ impl ForwardHandler {
 
     /// Runs the request path. Everything observable about the result comes back in `Finished`.
     async fn process<R: ResponseHandler>(&self, request: &Request, response_handle: R) -> Finished {
+        if let Some(finished) = self.rate_limited(request, &response_handle).await {
+            return finished;
+        }
         if request.metadata.op_code != OpCode::Query {
             let info = send_error(request, ResponseCode::NotImp, response_handle).await;
             return Finished::plain(info, Outcome::Rejected);
@@ -187,26 +279,34 @@ impl ForwardHandler {
             let info = send_error(request, ResponseCode::Refused, response_handle).await;
             return Finished::plain(info, Outcome::Rejected);
         };
-        let source = request.src().ip();
+        let caller = self.caller(request.src().ip()).await;
 
         // Names this node owns are answered here and never go upstream.
         if let Some(finished) = self
-            .answer_locally(request, question, &name, source, response_handle.clone())
+            .answer_locally(request, question, &name, &caller, response_handle.clone())
             .await
         {
             return finished;
         }
 
         // Blocked queries need no upstream capacity, so they're decided before admission.
-        if let Some((block, reason)) = self.query_block(source, &name) {
+        if let Some((block, reason)) = self.query_block(&caller, &name) {
             let info = send_blocked(request, question, block, response_handle).await;
             return Finished {
                 info,
                 outcome: Outcome::Blocked,
                 reason,
                 upstream: None,
+                recorded: true,
             };
         }
+
+        // Names with their own servers never reach the default upstreams, even if those fail.
+        let route = self
+            .policy
+            .load()
+            .forward_route(&name)
+            .map(|route| (route.route, Arc::clone(&route.servers), route.load_balance));
 
         let edns = request.edns.as_ref().map(|edns| EdnsRequest {
             max_payload: edns.max_payload(),
@@ -218,6 +318,7 @@ impl ForwardHandler {
             record_type: question.query_type(),
             dnssec_ok,
             checking_disabled: request.metadata.checking_disabled,
+            route: route.as_ref().map_or(0, |(number, _, _)| *number),
         });
         if let (Some(cache), Some(key)) = (&self.cache, &cache_key)
             && let Some(hit) = cache.get(key)
@@ -229,6 +330,7 @@ impl ForwardHandler {
                     &name,
                     hit.message,
                     AnswerMeta {
+                        caller: &caller,
                         dnssec_ok,
                         validated: hit.validated,
                         upstream: None,
@@ -245,8 +347,10 @@ impl ForwardHandler {
         };
 
         // CD means the client wants to validate for itself, so this node stays out of the way.
+        // Forward zones are usually private, so they have no chain of trust to validate against.
         if let Some(validator) = &self.validator
             && !request.metadata.checking_disabled
+            && route.is_none()
         {
             let validated = match validator.resolve(question.original().clone()).await {
                 Ok(validated) => validated,
@@ -272,6 +376,7 @@ impl ForwardHandler {
                     &name,
                     validated.message,
                     AnswerMeta {
+                        caller: &caller,
                         dnssec_ok,
                         validated: secure,
                         upstream: self.pool.last_server(),
@@ -288,7 +393,21 @@ impl ForwardHandler {
             edns,
         };
 
-        let forwarded = match self.pool.forward(&upstream_request).await {
+        let pool = match &route {
+            Some((_, servers, load_balance)) => {
+                match self.services.conditional.pool(servers, *load_balance) {
+                    Ok(pool) => pool,
+                    Err(error) => {
+                        warn!(%error, "cannot reach a forward zone's servers");
+                        let info =
+                            send_error(request, ResponseCode::ServFail, response_handle).await;
+                        return Finished::plain(info, Outcome::Failed);
+                    }
+                }
+            }
+            None => Arc::clone(&self.pool),
+        };
+        let forwarded = match pool.forward(&upstream_request).await {
             Ok(forwarded) => forwarded,
             Err(error) => {
                 warn!(%error, "forwarding failed");
@@ -308,6 +427,7 @@ impl ForwardHandler {
             &name,
             forwarded.message,
             AnswerMeta {
+                caller: &caller,
                 dnssec_ok,
                 validated: false,
                 upstream: Some(forwarded.server),
@@ -323,13 +443,18 @@ impl ForwardHandler {
         request: &Request,
         question: &LowerQuery,
         name: &DomainName,
-        source: IpAddr,
+        caller: &Caller,
         response_handle: R,
     ) -> Option<Finished> {
         let (answer, blocked) = {
             let policy = self.policy.load();
             let answer = policy.local_answer(name, local_query(question.query_type()))?;
-            let blocked = match policy.check_local(source, &answer) {
+            // An operator's forward zone takes over a reserved name, like a private reverse zone.
+            if !answer.policy_applies && policy.forward_route(name).is_some() {
+                return None;
+            }
+            let blocked = match policy.check_local_with(self.filtering(), caller.source(), &answer)
+            {
                 Verdict::Allow | Verdict::ChainTooDeep => None,
                 Verdict::Block(decision) => {
                     Some((policy.block(), BlockReason::new(&decision, name.as_str())))
@@ -354,6 +479,7 @@ impl ForwardHandler {
                 outcome: Outcome::Blocked,
                 reason,
                 upstream: None,
+                recorded: true,
             });
         }
         let info = send_local(request, question, &answer, response_handle).await;
@@ -367,17 +493,17 @@ impl ForwardHandler {
         question: &LowerQuery,
         name: &DomainName,
         message: Message,
-        meta: AnswerMeta,
+        meta: AnswerMeta<'_>,
         response_handle: R,
     ) -> Finished {
         let AnswerMeta {
+            caller,
             dnssec_ok,
             validated,
             upstream,
         } = meta;
-        let source = request.src().ip();
         let action = match cname_targets(&message) {
-            Some(targets) => self.answer_action(source, name, &targets),
+            Some(targets) => self.answer_action(caller, name, &targets),
             None => AnswerAction::Fail,
         };
         match action {
@@ -399,6 +525,7 @@ impl ForwardHandler {
                     outcome,
                     reason: BlockReason::default(),
                     upstream,
+                    recorded: true,
                 }
             }
             AnswerAction::Block(block, reason) => {
@@ -408,6 +535,7 @@ impl ForwardHandler {
                     outcome: Outcome::Blocked,
                     reason,
                     upstream,
+                    recorded: true,
                 }
             }
             AnswerAction::Fail => {
@@ -423,6 +551,9 @@ impl ForwardHandler {
         let Some(telemetry) = &self.telemetry else {
             return;
         };
+        if !finished.recorded {
+            return;
+        }
         let policy = self.policy.load();
         let source = request.src().ip().to_canonical();
         let question = request.queries.queries().first();
@@ -434,9 +565,15 @@ impl ForwardHandler {
         let event = QueryEvent {
             seq: 0,
             occurred_at_ms,
-            client_id: policy
-                .identity(source)
-                .map(|identity| identity.id.to_string()),
+            client_id: {
+                let caller = Caller {
+                    address: source,
+                    device: self.services.devices.get(source),
+                };
+                policy
+                    .identity(caller.source())
+                    .map(|identity| identity.id.to_string())
+            },
             client_ip: Some(source.to_string()),
             qname: question.map(|question| {
                 let name = question.name().to_string();

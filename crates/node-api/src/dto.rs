@@ -381,6 +381,8 @@ pub struct ClientDto {
     pub known: bool,
     pub name: Option<String>,
     pub addresses: Vec<String>,
+    pub macs: Vec<String>,
+    pub hostnames: Vec<String>,
     pub groups: Vec<String>,
     /// Queries in the last 7 days.
     pub query_count: i64,
@@ -395,6 +397,8 @@ impl ClientDto {
             known: true,
             name: client.name.clone(),
             addresses: client.addresses.clone(),
+            macs: client.macs.clone(),
+            hostnames: client.hostnames.clone(),
             groups: client.groups.clone(),
             query_count: seen.map_or(0, |seen| seen.0),
             last_seen_at: seen.map(|seen| to_iso(seen.1)),
@@ -405,7 +409,12 @@ impl ClientDto {
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct CreateClient {
     pub name: String,
+    #[serde(default)]
     pub addresses: Vec<String>,
+    #[serde(default)]
+    pub macs: Vec<String>,
+    #[serde(default)]
+    pub hostnames: Vec<String>,
     #[serde(default)]
     pub groups: Vec<String>,
 }
@@ -414,6 +423,8 @@ pub struct CreateClient {
 pub struct UpdateClient {
     pub name: Option<String>,
     pub addresses: Option<Vec<String>>,
+    pub macs: Option<Vec<String>>,
+    pub hostnames: Option<Vec<String>>,
     pub groups: Option<Vec<String>>,
 }
 
@@ -633,6 +644,11 @@ pub struct SettingsDto {
     pub query_log_mode: QueryLogModeDto,
     pub query_history_days: u32,
     pub query_history_max_bytes: u64,
+    /// Queries per minute for each client address, which is also the largest burst. 0 turns the
+    /// limit off.
+    pub rate_limit_queries_per_minute: u32,
+    /// Addresses or networks with no limit.
+    pub rate_limit_exempt: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, IntoParams)]
@@ -677,6 +693,86 @@ pub struct SystemStatus {
     pub telemetry_write_errors: u64,
     pub query_history_bytes: u64,
     pub query_history_retained_seconds: u64,
+    /// Queries refused for being over a client's limit, since the node started.
+    pub rate_limited_queries: u64,
+    /// Present when this node serves NTP.
+    pub ntp: Option<NtpStatusDto>,
+}
+
+/// The state of this node's NTP server.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct NtpStatusDto {
+    pub listeners: Vec<String>,
+    /// `synchronized`, `unsynchronized` or `unknown`.
+    pub clock: String,
+    pub requests_served: u64,
+    pub requests_limited: u64,
+}
+
+/// Whether blocking is paused.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct BlockingDto {
+    pub paused: bool,
+    /// When blocking resumes.
+    pub paused_until: Option<String>,
+    pub remaining_seconds: u64,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct PauseBlocking {
+    /// How long to pause for, up to a day.
+    pub seconds: u64,
+}
+
+/// Names that go to specific servers instead of the default upstreams.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ForwardZoneDto {
+    pub id: String,
+    /// Domains, or networks whose reverse lookups go to these servers.
+    pub zones: Vec<String>,
+    pub servers: Vec<String>,
+    /// Shares queries between the servers, instead of using the first one that works.
+    pub load_balance: bool,
+    /// What's been seen from these servers since the node started. Empty until they're used.
+    pub stats: Vec<UpstreamDto>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct CreateForwardZone {
+    pub zones: Vec<String>,
+    pub servers: Vec<String>,
+    #[serde(default)]
+    pub load_balance: bool,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct UpdateForwardZone {
+    pub zones: Option<Vec<String>>,
+    pub servers: Option<Vec<String>>,
+    pub load_balance: Option<bool>,
+}
+
+/// A device seen on the network or asking this node.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct NetworkDeviceDto {
+    /// Its MAC address, or its IP address if the MAC isn't known.
+    pub id: String,
+    pub mac: Option<String>,
+    pub addresses: Vec<String>,
+    pub hostname: Option<String>,
+    /// Whether the kernel's neighbor table lists it right now.
+    pub on_network: bool,
+    pub last_active_at: Option<String>,
+    pub first_seen_at: Option<String>,
+    /// The named client this device counts as.
+    pub client_id: Option<String>,
+    pub client_name: Option<String>,
+    pub groups: Vec<String>,
+    /// Queries in the last 7 days, when they can be told apart from other devices'.
+    pub query_count: Option<i64>,
+    pub last_query_at: Option<String>,
+    /// Whether it's over its query limit right now.
+    pub rate_limited: bool,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -745,7 +841,7 @@ pub struct QueryParams {
     pub qname: Option<String>,
     /// A client ID or address.
     pub client: Option<String>,
-    /// `forwarded`, `cached`, `local`, `blocked`, `rejected` or `failed`.
+    /// `forwarded`, `cached`, `local`, `blocked`, `rejected`, `rate_limited` or `failed`.
     pub action: Option<String>,
     pub qtype: Option<String>,
     pub from: Option<String>,
@@ -774,6 +870,7 @@ pub enum QueryAction {
     Blocked,
     Rejected,
     Failed,
+    RateLimited,
 }
 
 impl From<Outcome> for QueryAction {
@@ -785,6 +882,7 @@ impl From<Outcome> for QueryAction {
             Outcome::Blocked => Self::Blocked,
             Outcome::Rejected => Self::Rejected,
             Outcome::Failed => Self::Failed,
+            Outcome::RateLimited => Self::RateLimited,
         }
     }
 }
@@ -874,4 +972,34 @@ pub struct PageInfo {
 pub struct QueryPageDto {
     pub data: Vec<QueryEventDto>,
     pub page: PageInfo,
+}
+
+/// A change to how the dashboard is reached, which undoes itself unless it's kept.
+#[derive(Serialize, ToSchema)]
+pub struct PendingNodeChange {
+    pub seconds_left: u64,
+}
+
+/// The node's own settings, and how a change to them is going.
+#[derive(Serialize, ToSchema)]
+pub struct NodeSettingsView {
+    /// The saved values, which the node uses from its next start.
+    pub settings: crate::NodeSettings,
+    /// The values from the command line and environment, without any changes from here.
+    pub startup: crate::NodeSettings,
+    /// Which settings differ from the startup values.
+    pub changed: Vec<String>,
+    /// Different each time the node starts.
+    pub boot_id: String,
+    pub pending: Option<PendingNodeChange>,
+    /// Why the last change was undone.
+    pub last_failure: Option<String>,
+}
+
+/// The result of saving the node's settings.
+#[derive(Serialize, ToSchema)]
+pub struct SaveNodeSettingsResponse {
+    pub view: NodeSettingsView,
+    /// Whether the node is restarting to use them.
+    pub restarting: bool,
 }

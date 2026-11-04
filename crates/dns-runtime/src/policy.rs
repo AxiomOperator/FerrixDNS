@@ -250,7 +250,7 @@ impl PolicyManager {
         let revision = sha256_hex(content.as_bytes());
         let current = self.active.load_full();
         let previous = state.document.as_ref().map(|old| (old, &*current));
-        let policy = CompiledPolicy::compile_with(
+        let policy = compile_checked(
             &revision,
             &document,
             SystemTime::now(),
@@ -322,7 +322,7 @@ impl PolicyManager {
 
         let current = self.active.load_full();
         let previous = state.document.as_ref().map(|old| (old, &*current));
-        let policy = CompiledPolicy::compile_with(
+        let policy = compile_checked(
             revision,
             &document,
             SystemTime::now(),
@@ -404,11 +404,10 @@ impl PolicyManager {
                 .put(artifact)
                 .map_err(MutationError::Storage)?;
         }
-        let policy =
-            CompiledPolicy::compile_with(revision, &document, SystemTime::now(), None, &|sha256| {
-                load_artifact(Some(&artifact_store), sha256)
-            })
-            .map_err(MutationError::Invalid)?;
+        let policy = compile_checked(revision, &document, SystemTime::now(), None, &|sha256| {
+            load_artifact(Some(&artifact_store), sha256)
+        })
+        .map_err(MutationError::Invalid)?;
 
         // Oldest first, so the newest ends up at the front of the history.
         for (_, content) in revisions.iter().rev() {
@@ -435,7 +434,7 @@ impl PolicyManager {
         let (true, Some(document)) = (due, state.document.as_ref()) else {
             return Ok(false);
         };
-        let rebuilt = CompiledPolicy::compile_with(
+        let rebuilt = compile_checked(
             current.revision(),
             document,
             now,
@@ -542,7 +541,7 @@ fn load_file(
     let content = read_source(path)?;
     let document = parse(path, &content)?;
     let revision = sha256_hex(&content);
-    let policy = CompiledPolicy::compile_with(
+    let policy = compile_checked(
         &revision,
         &document,
         SystemTime::now(),
@@ -578,7 +577,7 @@ fn last_known_good(
             .ok()
             .and_then(|text| PolicyDocument::parse(text).ok())
             .and_then(|document| {
-                CompiledPolicy::compile_with(
+                compile_checked(
                     &revision.sha256,
                     &document,
                     SystemTime::now(),
@@ -604,6 +603,18 @@ fn last_known_good(
 
 fn short(revision: &str) -> &str {
     revision.get(..12).unwrap_or(revision)
+}
+
+/// Compiles a document, also checking what only this crate can.
+fn compile_checked(
+    revision: &str,
+    document: &PolicyDocument,
+    now: SystemTime,
+    previous: Option<(&PolicyDocument, &CompiledPolicy)>,
+    artifacts: dns_policy::ArtifactLoader<'_>,
+) -> Result<CompiledPolicy, PolicyError> {
+    crate::forward::validate_forward_servers(document)?;
+    CompiledPolicy::compile_with(revision, document, now, previous, artifacts)
 }
 
 #[cfg(test)]

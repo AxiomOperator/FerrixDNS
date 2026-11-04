@@ -11,11 +11,13 @@ import {
   LogOut,
   type LucideIcon,
   Menu,
+  Network,
   PanelLeftClose,
   PanelLeftOpen,
   Server,
   Settings,
   ShieldBan,
+  Split,
   Users,
   UsersRound,
 } from "lucide-react";
@@ -24,6 +26,8 @@ import { toast } from "sonner";
 
 import { Button } from "./ui/button";
 
+import { BlockingControl } from "@/features/blocking";
+import { NodeChangeBanner } from "@/features/node-settings";
 import { errorMessage, setCsrfToken } from "@/lib/api/client";
 import { api, queries } from "@/lib/api/hooks";
 import { cn } from "@/lib/utils";
@@ -40,6 +44,7 @@ const NAV: Array<{ heading?: string; items: NavItem[] }> = [
       { to: "/", label: "Overview", icon: Gauge },
       { to: "/queries", label: "Query Explorer", icon: Activity },
       { to: "/clients", label: "Clients", icon: Users },
+      { to: "/network", label: "Network", icon: Network },
     ],
   },
   {
@@ -55,6 +60,7 @@ const NAV: Array<{ heading?: string; items: NavItem[] }> = [
     items: [
       { to: "/dns/records", label: "Local DNS", icon: House },
       { to: "/dns/upstreams", label: "Upstreams", icon: Globe },
+      { to: "/dns/forwarders", label: "Conditional forwarding", icon: Split },
       { to: "/dns/cache", label: "Cache", icon: Database },
       { to: "/system", label: "System", icon: Server },
       { to: "/settings", label: "Settings", icon: Settings },
@@ -181,15 +187,19 @@ export function AppShell() {
             <Menu aria-hidden className="size-4" />
           </Button>
           <div className="ml-auto flex min-w-0 items-center gap-2">
+            <BlockingControl />
             {session.data && (
-              <span className="truncate text-sm text-text-secondary">{session.data.username}</span>
+              <span className="hidden truncate text-sm text-text-secondary sm:inline">
+                {session.data.username}
+              </span>
             )}
             <Button variant="ghost" size="sm" onClick={() => void signOut()}>
               <LogOut aria-hidden className="size-3.5" />
-              Sign out
+              <span className="sr-only sm:not-sr-only">Sign out</span>
             </Button>
           </div>
         </header>
+        <NodeChangeBanner />
         <main className="min-h-0 flex-1 overflow-y-auto p-4 lg:p-6">
           <div className="mx-auto max-w-[1600px]">
             <Outlet />

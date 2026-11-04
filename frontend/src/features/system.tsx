@@ -164,6 +164,42 @@ function BackupCard({ readOnly }: { readOnly: boolean }) {
   );
 }
 
+const CLOCK_LABELS = {
+  synchronized: { tone: "success", label: "Synchronized" },
+  unsynchronized: { tone: "error", label: "Not synchronized" },
+  unknown: { tone: "warning", label: "Can't tell" },
+} as const;
+
+function TimeCard({ ntp }: { ntp: Schemas["SystemStatus"]["ntp"] }) {
+  if (!ntp) {
+    return (
+      <Card>
+        <CardHeader
+          title="Time server"
+          description="Off. Add an address in Settings to share this machine's clock with your network."
+        />
+      </Card>
+    );
+  }
+  const clock = CLOCK_LABELS[ntp.clock as keyof typeof CLOCK_LABELS] ?? CLOCK_LABELS.unknown;
+  return (
+    <Card>
+      <CardHeader title="Time server" actions={<Badge tone={clock.tone}>{clock.label}</Badge>} />
+      <dl>
+        <Row label="NTP listeners">{ntp.listeners.join(", ")}</Row>
+        <Row label="Requests answered">{formatCount(ntp.requests_served)}</Row>
+        <Row label="Told to slow down">{formatCount(ntp.requests_limited)}</Row>
+      </dl>
+      {ntp.clock === "unsynchronized" && (
+        <p className="px-4 pb-4 text-sm text-text-secondary">
+          Nothing is keeping this machine&apos;s clock accurate, so devices will ignore this node.
+          Set up a time service such as systemd-timesyncd.
+        </p>
+      )}
+    </Card>
+  );
+}
+
 export function SystemPage({ readOnly }: { readOnly: boolean }) {
   const system = useQuery(queries.system());
   const revisions = useQuery(queries.revisions());
@@ -190,6 +226,7 @@ export function SystemPage({ readOnly }: { readOnly: boolean }) {
               <Row label="Running for">{formatSeconds(data.uptime_seconds)}</Row>
               <Row label="DNS listeners">{data.dns_listeners.join(", ")}</Row>
               <Row label="DNSSEC validation">{data.dnssec_validation ? "On" : "Off"}</Row>
+              <Row label="Queries over limit">{formatCount(data.rate_limited_queries)}</Row>
               <Row label="Active policy">
                 <code className="text-xs">{shortRevision(data.policy_revision)}</code>
               </Row>
@@ -198,6 +235,7 @@ export function SystemPage({ readOnly }: { readOnly: boolean }) {
               </Row>
             </dl>
           </Card>
+          <TimeCard ntp={data.ntp} />
           <Card>
             <CardHeader
               title="Query data"

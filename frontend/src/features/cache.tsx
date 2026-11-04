@@ -40,7 +40,7 @@ export function CachePage() {
       {cache.isError && <ErrorState error={cache.error} onRetry={() => void cache.refetch()} />}
       {data && !data.enabled && (
         <Card>
-          <Empty title="The cache is off">Start the node with --cache-mib above 0 to turn it on.</Empty>
+          <Empty title="The cache is off">Give it some memory in Settings to turn it on.</Empty>
         </Card>
       )}
       {data?.enabled && (

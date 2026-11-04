@@ -1697,6 +1697,8 @@ dependencies = [
  "futures-util",
  "hickory-proto",
  "humantime",
+ "ipnet",
+ "node-ntp",
  "rand 0.9.5",
  "reqwest",
  "rust-embed",
@@ -1709,6 +1711,7 @@ dependencies = [
  "tokio-stream",
  "tower",
  "tracing",
+ "tracing-subscriber",
  "ulid",
  "utoipa",
 ]
@@ -1730,12 +1733,24 @@ dependencies = [
  "humantime",
  "ipnet",
  "node-api",
+ "node-ntp",
  "rcgen",
  "rustls",
  "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "node-ntp"
+version = "0.1.0"
+dependencies = [
+ "dns-runtime",
+ "ipnet",
+ "libc",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

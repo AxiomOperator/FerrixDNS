@@ -1,12 +1,21 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
-import { type FormEvent, useEffect, useState } from "react";
+import { Tabs } from "radix-ui";
+import { type FormEvent, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { ErrorState, Loading, PageHeader, ReadOnlyNotice } from "@/components/states";
 import { Button } from "@/components/ui/button";
 import { Card, CardHeader } from "@/components/ui/card";
 import { Field, Input, Select } from "@/components/ui/form";
+import {
+  DashboardSettings,
+  DnsSettings,
+  NodeSettingsPanel,
+  SystemSettings,
+  useNodeSettingsForm,
+} from "@/features/node-settings";
+import { splitList } from "@/lib/format";
 import { errorMessage, setCsrfToken } from "@/lib/api/client";
 import { type Settings, api, queries, usePolicyMutation } from "@/lib/api/hooks";
 import { type Theme, setTheme, storedTheme } from "@/lib/theme";
@@ -22,12 +31,36 @@ const MODE_HINTS: Record<Settings["query_log_mode"], string> = {
 
 function SettingsForm({ settings, readOnly }: { settings: Settings; readOnly: boolean }) {
   const [values, setValues] = useState(settings);
-  useEffect(() => setValues(settings), [settings]);
-  const save = usePolicyMutation(() => api.saveSettings(values), "Settings saved and active");
+  const [exempt, setExempt] = useState(settings.rate_limit_exempt.join(", "));
+  // This page updates live, so show changes made elsewhere, unless they'd replace unsaved edits here.
+  const shown = useRef(settings);
+  useEffect(() => {
+    const previous = shown.current;
+    shown.current = settings;
+    const untouched =
+      JSON.stringify(values) === JSON.stringify(previous) &&
+      exempt === previous.rate_limit_exempt.join(", ");
+    if (untouched) {
+      setValues(settings);
+      setExempt(settings.rate_limit_exempt.join(", "));
+    }
+    // Only new settings from the node should run this, not typing.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [settings]);
+  const save = usePolicyMutation(
+    () => api.saveSettings({ ...values, rate_limit_exempt: splitList(exempt) }),
+    "Settings saved and active",
+  );
 
   function submit(event: FormEvent) {
     event.preventDefault();
-    save.mutate(undefined);
+    save.mutate(undefined, {
+      onSuccess: (saved) => {
+        shown.current = saved;
+        setValues(saved);
+        setExempt(saved.rate_limit_exempt.join(", "));
+      },
+    });
   }
 
   return (
@@ -66,6 +99,44 @@ function SettingsForm({ settings, readOnly }: { settings: Settings; readOnly: bo
               disabled={readOnly}
               value={values.block_ttl_seconds}
               onChange={(event) => setValues({ ...values, block_ttl_seconds: Number(event.target.value) })}
+            />
+          </Field>
+        </div>
+      </Card>
+      <Card>
+        <CardHeader
+          title="Query limit"
+          description="Refuses queries from a device that sends too many, so one misbehaving device can't overload this node."
+        />
+        <div className="grid gap-4 px-4 pb-4 sm:grid-cols-2">
+          <Field
+            label="Queries per minute, for each address"
+            htmlFor="rate-limit"
+            hint="This is also the largest burst. 0 turns the limit off."
+          >
+            <Input
+              id="rate-limit"
+              type="number"
+              min={0}
+              required
+              disabled={readOnly}
+              value={values.rate_limit_queries_per_minute}
+              onChange={(event) =>
+                setValues({ ...values, rate_limit_queries_per_minute: Number(event.target.value) })
+              }
+            />
+          </Field>
+          <Field
+            label="Addresses with no limit"
+            htmlFor="rate-exempt"
+            hint="Separated by commas. Add a router here if it forwards a whole network's queries."
+          >
+            <Input
+              id="rate-exempt"
+              autoComplete="off"
+              disabled={readOnly}
+              value={exempt}
+              onChange={(event) => setExempt(event.target.value)}
             />
           </Field>
         </div>
@@ -122,7 +193,8 @@ function SettingsForm({ settings, readOnly }: { settings: Settings; readOnly: bo
           </Field>
         </div>
       </Card>
-      <div className="flex justify-end">
+      <div className="flex flex-wrap items-center justify-end gap-3">
+        <p className="min-w-0 flex-1 text-sm text-text-secondary">These apply right away, without a restart.</p>
         <Button type="submit" variant="primary" disabled={readOnly || save.isPending}>
           Save settings
         </Button>
@@ -217,19 +289,79 @@ function AppearanceCard() {
   );
 }
 
-export function SettingsPage({ readOnly }: { readOnly: boolean }) {
+export const SETTINGS_TABS = ["blocking", "dns", "dashboard", "system", "account"] as const;
+export type SettingsTab = (typeof SETTINGS_TABS)[number];
+
+const TAB_LABELS: Record<SettingsTab, string> = {
+  blocking: "Blocking and logs",
+  dns: "DNS",
+  dashboard: "Dashboard",
+  system: "System",
+  account: "Account",
+};
+
+export function SettingsPage({
+  readOnly,
+  tab,
+  onTabChange,
+}: {
+  readOnly: boolean;
+  tab: SettingsTab;
+  onTabChange: (tab: SettingsTab) => void;
+}) {
   const settings = useQuery(queries.settings());
+  const node = useNodeSettingsForm();
+
   return (
     <>
       <PageHeader title="Settings" />
-      {readOnly && <ReadOnlyNotice />}
-      {settings.isPending && <Loading />}
-      {settings.isError && <ErrorState error={settings.error} onRetry={() => void settings.refetch()} />}
-      <div className="space-y-4">
-        {settings.data && <SettingsForm settings={settings.data} readOnly={readOnly} />}
-        <PasswordCard />
-        <AppearanceCard />
-      </div>
+      <Tabs.Root value={tab} onValueChange={(value) => onTabChange(value as SettingsTab)}>
+        <Tabs.List
+          aria-label="Settings sections"
+          className="mb-4 flex gap-1 overflow-x-auto border-b border-border"
+        >
+          {SETTINGS_TABS.map((name) => (
+            <Tabs.Trigger
+              key={name}
+              value={name}
+              className="-mb-px cursor-pointer border-b-2 border-transparent px-3 py-2 text-sm whitespace-nowrap text-text-secondary hover:text-text data-[state=active]:border-accent data-[state=active]:font-medium data-[state=active]:text-text"
+            >
+              {TAB_LABELS[name]}
+              {name !== "blocking" && name !== "account" && node.tabIsDirty(name) && (
+                <span className="ml-1.5 text-accent">
+                  <span aria-hidden>•</span>
+                  <span className="sr-only">(unsaved changes)</span>
+                </span>
+              )}
+            </Tabs.Trigger>
+          ))}
+        </Tabs.List>
+        <Tabs.Content value="blocking">
+          {readOnly && <ReadOnlyNotice />}
+          {settings.isPending && <Loading />}
+          {settings.isError && <ErrorState error={settings.error} onRetry={() => void settings.refetch()} />}
+          {settings.data && <SettingsForm settings={settings.data} readOnly={readOnly} />}
+        </Tabs.Content>
+        <Tabs.Content value="dns">
+          <NodeSettingsPanel form={node}>
+            <DnsSettings form={node} />
+          </NodeSettingsPanel>
+        </Tabs.Content>
+        <Tabs.Content value="dashboard">
+          <NodeSettingsPanel form={node}>
+            <DashboardSettings form={node} />
+          </NodeSettingsPanel>
+        </Tabs.Content>
+        <Tabs.Content value="system">
+          <NodeSettingsPanel form={node}>
+            <SystemSettings form={node} />
+          </NodeSettingsPanel>
+        </Tabs.Content>
+        <Tabs.Content value="account" className="space-y-4">
+          <PasswordCard />
+          <AppearanceCard />
+        </Tabs.Content>
+      </Tabs.Root>
     </>
   );
 }

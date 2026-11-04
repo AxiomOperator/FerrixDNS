@@ -437,6 +437,7 @@ impl Fixture {
 /// Options for starting the server under test.
 pub struct ServerOptions {
     pub upstreams: Vec<UpstreamServer>,
+    pub load_balance: bool,
     pub trust_roots: Option<Vec<Vec<u8>>>,
     pub dnssec: Option<dns_runtime::DnssecConfig>,
     pub allow: Vec<IpNet>,
@@ -446,12 +447,14 @@ pub struct ServerOptions {
     pub rounds: u32,
     pub policy: PolicyHandle,
     pub cache: Option<Arc<dns_cache::DnsCache>>,
+    pub neighbors: dns_runtime::NeighborSource,
 }
 
 impl ServerOptions {
     pub fn new(upstreams: Vec<SocketAddr>) -> Self {
         Self {
             upstreams: upstreams.into_iter().map(UpstreamServer::from).collect(),
+            load_balance: false,
             trust_roots: None,
             dnssec: None,
             allow: dns_runtime::default_allow(),
@@ -461,17 +464,26 @@ impl ServerOptions {
             rounds: 1,
             policy: empty_policy(),
             cache: None,
+            neighbors: dns_runtime::NeighborSource::fixed(vec![]),
         }
     }
 }
 
 /// Starts the server under test on a free loopback port and returns its address.
 pub async fn start_server(options: ServerOptions) -> SocketAddr {
+    start_server_with_services(options).await.0
+}
+
+/// Like [`start_server`], also returning the parts that the API would control.
+pub async fn start_server_with_services(
+    options: ServerOptions,
+) -> (SocketAddr, dns_runtime::Services) {
     let server = DnsServer::bind(RuntimeConfig {
         listen: vec!["127.0.0.1:0".parse().unwrap()],
         allow: options.allow,
         upstreams: PoolConfig {
             servers: options.upstreams,
+            load_balance: options.load_balance,
             trust_roots: options.trust_roots,
             attempt_timeout: options.attempt_timeout,
             total_timeout: options.total_timeout,
@@ -482,12 +494,14 @@ pub async fn start_server(options: ServerOptions) -> SocketAddr {
         telemetry: None,
         cache: options.cache,
         dnssec: options.dnssec,
+        neighbors: options.neighbors,
     })
     .await
     .unwrap();
     let addr = server.local_addrs()[0];
+    let services = server.services();
     tokio::spawn(server.run(std::future::pending()));
-    addr
+    (addr, services)
 }
 
 /// Builds a query with a random ID and recursion desired.

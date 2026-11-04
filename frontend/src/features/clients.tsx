@@ -10,16 +10,14 @@ import { ConfirmDialog, Dialog } from "@/components/ui/dialog";
 import { Field, Input } from "@/components/ui/form";
 import { Table, TableWrap, Td, Th } from "@/components/ui/table";
 import { type Client, api, queries, usePolicyMutation } from "@/lib/api/hooks";
-import { formatCount, timeAgo } from "@/lib/format";
+import { formatCount, splitList, timeAgo } from "@/lib/format";
 
-function splitList(value: string): string[] {
-  return value
-    .split(",")
-    .map((item) => item.trim())
-    .filter(Boolean);
+/** What identifies a client, as one line. */
+function identifiers(client: Client): string {
+  return [...client.addresses, ...client.macs, ...client.hostnames].join(", ");
 }
 
-function ClientDialog({
+export function ClientDialog({
   open,
   client,
   onClose,
@@ -30,20 +28,32 @@ function ClientDialog({
 }) {
   const [name, setName] = useState("");
   const [addresses, setAddresses] = useState("");
+  const [macs, setMacs] = useState("");
+  const [hostnames, setHostnames] = useState("");
   const [groups, setGroups] = useState("");
   const known = client?.known === true;
 
   useEffect(() => {
     if (open) {
       setName(client?.name ?? "");
-      setAddresses(client?.addresses.join(", ") ?? "");
+      // A MAC address outlasts an IP address, so a new client starts with it if there is one.
+      const preferMac = !known && (client?.macs.length ?? 0) > 0;
+      setAddresses(preferMac ? "" : (client?.addresses.join(", ") ?? ""));
+      setMacs(client?.macs.join(", ") ?? "");
+      setHostnames(client?.hostnames.join(", ") ?? "");
       setGroups(client?.groups.join(", ") ?? "");
     }
-  }, [open, client]);
+  }, [open, client, known]);
 
   const save = usePolicyMutation(
     () => {
-      const body = { name, addresses: splitList(addresses), groups: splitList(groups) };
+      const body = {
+        name,
+        addresses: splitList(addresses),
+        macs: splitList(macs),
+        hostnames: splitList(hostnames),
+        groups: splitList(groups),
+      };
       return known && client ? api.updateClient(client.id, body) : api.createClient(body);
     },
     known ? "Client updated" : "Client named",
@@ -61,7 +71,7 @@ function ClientDialog({
         if (!next) onClose();
       }}
       title={known ? "Edit client" : "Name a client"}
-      description="Clients are identified by their source address, so a device behind NAT or with a changing address may not match reliably."
+      description="Use at least one way to recognize this device. An exact address wins, then MAC address, host name and finally the longest matching network. These aren't proof of identity, because a device can change them."
     >
       <form className="space-y-4" onSubmit={submit}>
         <Field label="Name" htmlFor="client-name">
@@ -77,11 +87,36 @@ function ClientDialog({
         <Field label="Addresses" htmlFor="client-addresses" hint="IP addresses or networks, separated by commas.">
           <Input
             id="client-addresses"
-            required
             autoComplete="off"
             placeholder="192.168.1.50"
             value={addresses}
             onChange={(event) => setAddresses(event.target.value)}
+          />
+        </Field>
+        <Field
+          label="MAC addresses"
+          htmlFor="client-macs"
+          hint="Keeps working when the address changes, but only for devices on this node's network segment."
+        >
+          <Input
+            id="client-macs"
+            autoComplete="off"
+            placeholder="aa:bb:cc:dd:ee:ff"
+            value={macs}
+            onChange={(event) => setMacs(event.target.value)}
+          />
+        </Field>
+        <Field
+          label="Host names"
+          htmlFor="client-hostnames"
+          hint="From reverse lookups, so this needs conditional forwarding to your router or local DNS records. A name with no dots matches any domain."
+        >
+          <Input
+            id="client-hostnames"
+            autoComplete="off"
+            placeholder="tablet"
+            value={hostnames}
+            onChange={(event) => setHostnames(event.target.value)}
           />
         </Field>
         <Field label="Groups (optional)" htmlFor="client-groups" hint="Group names, separated by commas.">
@@ -141,7 +176,7 @@ export function ClientsPage({ readOnly }: { readOnly: boolean }) {
               <thead>
                 <tr>
                   <Th>Client</Th>
-                  <Th>Addresses</Th>
+                  <Th>Identified by</Th>
                   <Th>Groups</Th>
                   <Th className="text-right">Queries (7 days)</Th>
                   <Th>Last seen</Th>
@@ -160,7 +195,7 @@ export function ClientsPage({ readOnly }: { readOnly: boolean }) {
                         <Badge>Unnamed</Badge>
                       )}
                     </Td>
-                    <Td className="text-text-secondary">{client.addresses.join(", ")}</Td>
+                    <Td className="text-text-secondary">{identifiers(client)}</Td>
                     <Td className="text-text-secondary">{client.groups.join(", ") || "None"}</Td>
                     <Td className="text-right">{formatCount(client.query_count)}</Td>
                     <Td className="whitespace-nowrap text-text-secondary">

@@ -17,6 +17,10 @@ export type Settings = Schemas["SettingsDto"];
 export type TestResult = Schemas["TestRuleResponse"];
 export type LocalZone = Schemas["LocalZoneDto"];
 export type LocalRecord = Schemas["LocalRecordDto"];
+export type ForwardZone = Schemas["ForwardZoneDto"];
+export type NetworkDevice = Schemas["NetworkDeviceDto"];
+export type NodeSettings = Schemas["NodeSettings"];
+export type NodeSettingsView = Schemas["NodeSettingsView"];
 
 export interface QueryFilters {
   qname?: string;
@@ -25,7 +29,22 @@ export interface QueryFilters {
   qtype?: string;
 }
 
-const REFRESH_MS = 15_000;
+/** How often open pages update. Browsers pause this for tabs that aren't visible. */
+const REFRESH_MS = 2_000;
+/** A slow request gets this many times as long to rest, so a big history can't keep the node busy. */
+const REST_FACTOR = 5;
+
+const requestTimes = new Map<string, number>();
+
+async function timed<T>(name: string, load: () => Promise<T>): Promise<T> {
+  const started = performance.now();
+  const result = await load();
+  requestTimes.set(name, performance.now() - started);
+  return result;
+}
+
+const pacedRefresh = (name: string) => () =>
+  Math.max(REFRESH_MS, (requestTimes.get(name) ?? 0) * REST_FACTOR);
 
 function queryString(values: Record<string, string | number | undefined>): string {
   const params = new URLSearchParams();
@@ -55,12 +74,14 @@ export const queries = {
       queryFn: ({ signal }) => {
         const to = new Date();
         const from = new Date(to.getTime() - hours * 3_600_000);
-        return getData<Schemas["OverviewDto"]>(
-          `/overview${queryString({ from: from.toISOString(), to: to.toISOString() })}`,
-          signal,
+        return timed("overview", () =>
+          getData<Schemas["OverviewDto"]>(
+            `/overview${queryString({ from: from.toISOString(), to: to.toISOString() })}`,
+            signal,
+          ),
         );
       },
-      refetchInterval: REFRESH_MS,
+      refetchInterval: pacedRefresh("overview"),
     }),
   queryLog: (filters: QueryFilters) =>
     infiniteQueryOptions({
@@ -79,24 +100,43 @@ export const queries = {
     queryOptions({
       queryKey: ["rules"],
       queryFn: ({ signal }) => getData<Rule[]>("/rules", signal),
+      refetchInterval: REFRESH_MS,
     }),
   lists: () =>
     queryOptions({
       queryKey: ["lists"],
       queryFn: ({ signal }) => getData<List[]>("/lists", signal),
-      // Downloads finish in the background, so this keeps their status current.
-      refetchInterval: 3_000,
+      refetchInterval: REFRESH_MS,
     }),
   clients: () =>
     queryOptions({
       queryKey: ["clients"],
-      queryFn: ({ signal }) => getData<Client[]>("/clients", signal),
-      refetchInterval: REFRESH_MS,
+      queryFn: ({ signal }) => timed("clients", () => getData<Client[]>("/clients", signal)),
+      refetchInterval: pacedRefresh("clients"),
     }),
   groups: () =>
     queryOptions({
       queryKey: ["groups"],
       queryFn: ({ signal }) => getData<Group[]>("/groups", signal),
+      refetchInterval: REFRESH_MS,
+    }),
+  blocking: () =>
+    queryOptions({
+      queryKey: ["blocking"],
+      queryFn: ({ signal }) => getData<Schemas["BlockingDto"]>("/blocking", signal),
+      refetchInterval: REFRESH_MS,
+    }),
+  devices: () =>
+    queryOptions({
+      queryKey: ["devices"],
+      queryFn: ({ signal }) => timed("devices", () => getData<NetworkDevice[]>("/network/devices", signal)),
+      refetchInterval: pacedRefresh("devices"),
+    }),
+  forwarders: () =>
+    queryOptions({
+      queryKey: ["forwarders"],
+      queryFn: ({ signal }) => getData<ForwardZone[]>("/dns/forwarders", signal),
+      refetchInterval: REFRESH_MS,
     }),
   upstreams: () =>
     queryOptions({
@@ -114,21 +154,31 @@ export const queries = {
     queryOptions({
       queryKey: ["zones"],
       queryFn: ({ signal }) => getData<LocalZone[]>("/dns/zones", signal),
+      refetchInterval: REFRESH_MS,
     }),
   records: () =>
     queryOptions({
       queryKey: ["records"],
       queryFn: ({ signal }) => getData<LocalRecord[]>("/dns/records", signal),
+      refetchInterval: REFRESH_MS,
     }),
   revisions: () =>
     queryOptions({
       queryKey: ["revisions"],
       queryFn: ({ signal }) => getData<Schemas["RevisionDto"][]>("/config/revisions", signal),
+      refetchInterval: REFRESH_MS,
+    }),
+  nodeSettings: () =>
+    queryOptions({
+      queryKey: ["node-settings"],
+      queryFn: ({ signal }) => getData<NodeSettingsView>("/node-settings", signal),
+      refetchInterval: (query) => (query.state.data?.pending ? 1_000 : REFRESH_MS),
     }),
   settings: () =>
     queryOptions({
       queryKey: ["settings"],
       queryFn: ({ signal }) => getData<Settings>("/settings", signal),
+      refetchInterval: REFRESH_MS,
     }),
   system: () =>
     queryOptions({
@@ -140,6 +190,7 @@ export const queries = {
     queryOptions({
       queryKey: ["audit"],
       queryFn: ({ signal }) => getData<Schemas["AuditEventDto"][]>("/audit-events", signal),
+      refetchInterval: REFRESH_MS,
       gcTime: 0,
     }),
 };
@@ -152,6 +203,9 @@ const POLICY_KEYS = [
   "groups",
   "zones",
   "records",
+  "blocking",
+  "devices",
+  "forwarders",
   "cache",
   "revisions",
   "system",
@@ -207,11 +261,24 @@ export const api = {
   updateRecord: (id: string, body: Schemas["UpdateLocalRecord"]) =>
     sendData<LocalRecord>("PATCH", `/dns/records/${id}`, { body }),
   deleteRecord: (id: string) => request<void>("DELETE", `/dns/records/${id}`),
+  pauseBlocking: (body: Schemas["PauseBlocking"]) =>
+    sendData<Schemas["BlockingDto"]>("POST", "/blocking/pause", { body }),
+  resumeBlocking: () => sendData<Schemas["BlockingDto"]>("POST", "/blocking/resume"),
+  createForwarder: (body: Schemas["CreateForwardZone"]) =>
+    sendData<ForwardZone>("POST", "/dns/forwarders", { body }),
+  updateForwarder: (id: string, body: Schemas["UpdateForwardZone"]) =>
+    sendData<ForwardZone>("PATCH", `/dns/forwarders/${id}`, { body }),
+  deleteForwarder: (id: string) => request<void>("DELETE", `/dns/forwarders/${id}`),
   flushCache: () => request<void>("DELETE", "/dns/cache"),
   testUpstreams: () => sendData<Schemas["UpstreamTestResult"]>("POST", "/dns/upstreams/test"),
   activateRevision: (revision: string) =>
     request<void>("POST", "/config/activate", { body: { revision } }),
   saveSettings: (body: Settings) => sendData<Settings>("PUT", "/settings", { body }),
+  nodeSettings: () => getData<NodeSettingsView>("/node-settings"),
+  saveNodeSettings: (body: NodeSettings) =>
+    sendData<Schemas["SaveNodeSettingsResponse"]>("PUT", "/node-settings", { body }),
+  keepNodeSettings: () => sendData<NodeSettingsView>("POST", "/node-settings/confirm"),
+  undoNodeSettings: () => sendData<NodeSettingsView>("POST", "/node-settings/undo"),
   login: (body: Schemas["LoginRequest"]) =>
     sendData<Schemas["SessionInfo"]>("POST", "/auth/login", { body }),
   setup: (body: Schemas["SetupRequest"]) =>

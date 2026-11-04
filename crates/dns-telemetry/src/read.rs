@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, PoisonError};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use sqlx::sqlite::SqliteRow;
@@ -7,11 +9,34 @@ use sqlx::{Row, SqliteConnection};
 use tracing::warn;
 
 use crate::store;
-use crate::{Outcome, QueryEvent, Telemetry, TelemetryError};
+use crate::{Outcome, QueryEvent, Shared, Telemetry, TelemetryError};
 
 /// The most segments a top-domains query reads, to keep dashboards cheap.
 const TOP_DOMAIN_SEGMENTS: usize = 2;
 const TOP_LIMIT: i64 = 10;
+/// A range ending this close to now is what a live dashboard asks for.
+const RECENT_RANGE_MS: i64 = 60_000;
+/// The least time between recounts of a recent range's top domains.
+const TOP_DOMAINS_MIN_WAIT: Duration = Duration::from_secs(2);
+/// Waiting this many times as long as a recount took keeps it to a small share of one CPU core,
+/// however much history there is and however many dashboards are open.
+const TOP_DOMAINS_WAIT_FACTOR: u32 = 10;
+const MAX_CACHED_RANGES: usize = 8;
+
+#[derive(Clone, Default)]
+struct TopDomains {
+    blocked: Vec<DomainCount>,
+    allowed: Vec<DomainCount>,
+}
+
+pub(crate) struct CachedTopDomains {
+    value: TopDomains,
+    refresh_after: Instant,
+    refreshing: bool,
+}
+
+/// Top domains of recent ranges, by the range's length in minutes.
+pub(crate) type TopDomainsCache = HashMap<i64, CachedTopDomains>;
 
 /// Filters for a query log page.
 #[derive(Clone, Debug, Default)]
@@ -100,6 +125,7 @@ fn parse_outcome(value: &str) -> Outcome {
         "local" => Outcome::Local,
         "blocked" => Outcome::Blocked,
         "rejected" => Outcome::Rejected,
+        "rate_limited" => Outcome::RateLimited,
         _ => Outcome::Failed,
     }
 }
@@ -246,69 +272,8 @@ impl Telemetry {
             }
         }
 
-        let top_blocked_domains = self
-            .top_domains(from_ms, to_ms, "blocked", "blocked", "blocked")
-            .await;
-        let top_domains = self
-            .top_domains(from_ms, to_ms, "forwarded", "cached", "local")
-            .await;
-        Ok(totals.finish(from_ms, to_ms, top_blocked_domains, top_domains))
-    }
-
-    /// Counts domains in recent segments. Only per-query logging modes can provide these.
-    async fn top_domains(
-        &self,
-        from_ms: i64,
-        to_ms: i64,
-        first: &str,
-        second: &str,
-        third: &str,
-    ) -> Vec<DomainCount> {
-        let directory = &self.shared.directory;
-        let mut counts: HashMap<String, i64> = HashMap::new();
-        for day in store::segment_days(directory)
-            .into_iter()
-            .take(TOP_DOMAIN_SEGMENTS)
-        {
-            let Ok(mut connection) = store::open_segment_for_read(directory, &day).await else {
-                continue;
-            };
-            let rows = sqlx::query(
-                "SELECT qname, COUNT(*) AS total FROM query_events WHERE qname IS NOT NULL \
-                 AND occurred_at_ms >= ? AND occurred_at_ms <= ? AND outcome IN (?, ?, ?) \
-                 GROUP BY qname ORDER BY total DESC LIMIT 200",
-            )
-            .bind(from_ms)
-            .bind(to_ms)
-            .bind(first)
-            .bind(second)
-            .bind(third)
-            .fetch_all(&mut connection)
-            .await;
-            let Ok(rows) = rows else {
-                continue;
-            };
-            for row in rows {
-                if let (Ok(domain), Ok(total)) = (
-                    row.try_get::<String, _>("qname"),
-                    row.try_get::<i64, _>("total"),
-                ) {
-                    *counts.entry(domain).or_default() += total;
-                }
-            }
-        }
-        let mut sorted: Vec<DomainCount> = counts
-            .into_iter()
-            .map(|(domain, count)| DomainCount { domain, count })
-            .collect();
-        sorted.sort_by(|left, right| {
-            right
-                .count
-                .cmp(&left.count)
-                .then_with(|| left.domain.cmp(&right.domain))
-        });
-        sorted.truncate(usize::try_from(TOP_LIMIT).unwrap_or(10));
-        sorted
+        let top = recent_top_domains(&self.shared, from_ms, to_ms).await;
+        Ok(totals.finish(from_ms, to_ms, top.blocked, top.allowed))
     }
 
     /// Query counts by client key since a time, for the client inventory.
@@ -396,6 +361,127 @@ fn bucket_size(span_ms: i64) -> i64 {
     1440 * 60_000
 }
 
+/// Totals and charts read rollups, which stay cheap, but top domains have to count the query log,
+/// which can take seconds. So a live dashboard gets the last count at once, and a new one is made in
+/// the background when it's due. Older ranges don't change, so they're just counted.
+async fn recent_top_domains(shared: &Arc<Shared>, from_ms: i64, to_ms: i64) -> TopDomains {
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|elapsed| i64::try_from(elapsed.as_millis()).ok())
+        .unwrap_or(0);
+    if (now_ms - to_ms).abs() > RECENT_RANGE_MS {
+        return count_top_domains(shared, from_ms, to_ms).await;
+    }
+    let range = (to_ms - from_ms) / 60_000;
+
+    {
+        let mut cache = shared
+            .top_domains
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(cached) = cache.get_mut(&range) {
+            if !cached.refreshing && Instant::now() >= cached.refresh_after {
+                cached.refreshing = true;
+                let shared = Arc::clone(shared);
+                tokio::spawn(async move {
+                    let started = Instant::now();
+                    let value = count_top_domains(&shared, from_ms, to_ms).await;
+                    remember_top_domains(&shared, range, value, started.elapsed());
+                });
+            }
+            return cached.value.clone();
+        }
+    }
+
+    let started = Instant::now();
+    let value = count_top_domains(shared, from_ms, to_ms).await;
+    remember_top_domains(shared, range, value.clone(), started.elapsed());
+    value
+}
+
+fn remember_top_domains(shared: &Shared, range: i64, value: TopDomains, took: Duration) {
+    let mut cache = shared
+        .top_domains
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    if cache.len() >= MAX_CACHED_RANGES && !cache.contains_key(&range) {
+        cache.clear();
+    }
+    cache.insert(
+        range,
+        CachedTopDomains {
+            value,
+            refresh_after: Instant::now()
+                + TOP_DOMAINS_MIN_WAIT.max(took * TOP_DOMAINS_WAIT_FACTOR),
+            refreshing: false,
+        },
+    );
+}
+
+async fn count_top_domains(shared: &Shared, from_ms: i64, to_ms: i64) -> TopDomains {
+    TopDomains {
+        blocked: top_domains(shared, from_ms, to_ms, "blocked", "blocked", "blocked").await,
+        allowed: top_domains(shared, from_ms, to_ms, "forwarded", "cached", "local").await,
+    }
+}
+
+/// Counts domains in recent segments. Only per-query logging modes can provide these.
+async fn top_domains(
+    shared: &Shared,
+    from_ms: i64,
+    to_ms: i64,
+    first: &str,
+    second: &str,
+    third: &str,
+) -> Vec<DomainCount> {
+    let directory = &shared.directory;
+    let mut counts: HashMap<String, i64> = HashMap::new();
+    for day in store::segment_days(directory)
+        .into_iter()
+        .take(TOP_DOMAIN_SEGMENTS)
+    {
+        let Ok(mut connection) = store::open_segment_for_read(directory, &day).await else {
+            continue;
+        };
+        let rows = sqlx::query(
+            "SELECT qname, COUNT(*) AS total FROM query_events WHERE qname IS NOT NULL \
+                 AND occurred_at_ms >= ? AND occurred_at_ms <= ? AND outcome IN (?, ?, ?) \
+                 GROUP BY qname ORDER BY total DESC LIMIT 200",
+        )
+        .bind(from_ms)
+        .bind(to_ms)
+        .bind(first)
+        .bind(second)
+        .bind(third)
+        .fetch_all(&mut connection)
+        .await;
+        let Ok(rows) = rows else {
+            continue;
+        };
+        for row in rows {
+            if let (Ok(domain), Ok(total)) = (
+                row.try_get::<String, _>("qname"),
+                row.try_get::<i64, _>("total"),
+            ) {
+                *counts.entry(domain).or_default() += total;
+            }
+        }
+    }
+    let mut sorted: Vec<DomainCount> = counts
+        .into_iter()
+        .map(|(domain, count)| DomainCount { domain, count })
+        .collect();
+    sorted.sort_by(|left, right| {
+        right
+            .count
+            .cmp(&left.count)
+            .then_with(|| left.domain.cmp(&right.domain))
+    });
+    sorted.truncate(usize::try_from(TOP_LIMIT).unwrap_or(10));
+    sorted
+}
+
 struct Totals {
     origin_ms: i64,
     bucket_ms: i64,
@@ -451,7 +537,7 @@ impl Totals {
                 bucket.blocked += count;
                 self.blocked += count;
             }
-            "rejected" => {
+            "rejected" | "rate_limited" => {
                 bucket.rejected += count;
                 self.rejected += count;
             }

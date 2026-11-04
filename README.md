@@ -5,11 +5,13 @@ A self-hostable, Rust-native DNS filtering and management platform. The design i
 and decisions are recorded in [`docs/adr/`](docs/adr/).
 
 **Status:** early development, not yet production-tested. A standalone node filters and caches DNS,
-serves local zones, supports encrypted upstreams and DNSSEC validation, and has a web dashboard with
-backup and restore. The central controller for managing many nodes isn't built yet.
+serves local zones, supports encrypted upstreams, conditional forwarding and DNSSEC validation, and
+has a web dashboard with backup and restore. The central controller for managing many nodes isn't
+built yet.
 
 - [Installing and running a node](docs/operations/install.md): packages, containers, TLS and upgrades
 - [Backup and restore](docs/operations/backup.md)
+- [Network features](docs/operations/network.md): pausing, device identity, forwarding, query limits and NTP
 - [Performance measurements](docs/performance.md)
 
 ## Try the dashboard
@@ -46,6 +48,13 @@ Lost your password? This sets a new one from standard input and ends all session
 ```sh
 ferrixdns admin reset-password --state-dir .ferrix-state --username admin
 ```
+
+## Changing settings
+
+Every setting is in the dashboard, under **Settings**: addresses, upstreams, DNSSEC, the cache, TLS, the
+time server, the data folder, logging and more. The command line and environment only give the starting
+values. Saving these restarts the node for a few seconds. If a change would stop the node starting or cut off the dashboard, the previous
+settings come back by themselves. See [Node settings](docs/operations/settings.md).
 
 ## Managing policy
 

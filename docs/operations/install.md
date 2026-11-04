@@ -25,14 +25,24 @@ address avoids that. If you bind `0.0.0.0:53`, first set `DNSStubListener=no` in
 ## Container
 
 ```sh
-docker build -f packaging/docker/Dockerfile -t ferrixdns .
-docker compose -f packaging/docker/compose.yaml up -d   # after editing its addresses
-docker compose -f packaging/docker/compose.yaml logs | grep setup_token
+sudo scripts/docker-deploy.sh                      # uses this machine's main address
+sudo scripts/docker-deploy.sh --address 10.0.0.5   # or choose one
 ```
 
+This builds the image, starts it with `packaging/docker/compose.yaml`, waits until DNS answers, and
+prints the dashboard address and setup token. Run it again to upgrade. `--down` stops the node and
+keeps its data, and `--help` lists the other options.
+
+`sudo` isn't needed if your user can already use Docker, but a rootless Docker or Podman can't use
+port 53 with host networking.
+
+The node only answers loopback and private networks by default. If this machine's network is public
+address space, the script also allows that one network. Set `FERRIXDNS_ALLOW` to choose the list yourself.
+
 **Use host networking.** With published ports, containers usually see all queries coming from one
-gateway address, so per-client rules and client statistics can't work. The image runs as a non-root
-user with a read-only root filesystem, and needs only `NET_BIND_SERVICE`.
+gateway address, so per-client rules, client statistics and MAC addresses can't work. The image runs as a non-root
+user with a read-only root filesystem, and needs only `NET_BIND_SERVICE`. The binary holds that as a file
+capability, so the container can't use `no-new-privileges`, and it won't start if `NET_BIND_SERVICE` is dropped.
 
 ## Reaching the dashboard
 
@@ -82,3 +92,8 @@ the node answers itself, so upstream problems don't affect it.
 Install the new package and restart. A brief DNS gap is expected, which is why devices should have a
 second server. Back up first: database migrations run automatically, and downgrading after one isn't
 supported yet.
+
+## Changing settings later
+
+Every setting except the data folder can be changed in the dashboard, under **Settings**. See
+[Node settings](settings.md) for how this combines with the environment file, and how to recover.

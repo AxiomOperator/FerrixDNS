@@ -26,7 +26,7 @@ export function UpstreamsPage() {
     <>
       <PageHeader
         title="Upstreams"
-        description="Servers this node forwards to, tried in this order. They're set with --upstream when the node starts."
+        description="Servers this node forwards to. Change them, or how they share queries, in Settings."
         actions={
           <Button disabled={test.isPending} onClick={() => test.mutate()}>
             {test.isPending ? "Testing…" : "Test upstreams"}

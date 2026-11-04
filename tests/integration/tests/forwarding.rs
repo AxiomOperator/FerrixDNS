@@ -322,3 +322,57 @@ async fn handles_many_concurrent_queries() {
         );
     }
 }
+
+#[tokio::test]
+async fn load_balancing_shares_queries_between_servers() {
+    let first = Fixture::start().await;
+    let second = Fixture::start().await;
+    let mut options = ServerOptions::new(vec![first.addr, second.addr]);
+    options.load_balance = true;
+    let server = start_server(options).await;
+
+    for _ in 0..20 {
+        let response = ask(server, "a.fixture.test.", RecordType::A).await;
+        assert_eq!(response.metadata.response_code, ResponseCode::NoError);
+    }
+    assert_eq!(first.udp_queries(), 10);
+    assert_eq!(second.udp_queries(), 10);
+}
+
+#[tokio::test]
+async fn servers_are_used_in_order_unless_load_balanced() {
+    let first = Fixture::start().await;
+    let second = Fixture::start().await;
+    let server = start_server(ServerOptions::new(vec![first.addr, second.addr])).await;
+
+    for _ in 0..10 {
+        ask(server, "a.fixture.test.", RecordType::A).await;
+    }
+    assert_eq!(first.udp_queries(), 10);
+    assert_eq!(second.udp_queries(), 0);
+}
+
+#[tokio::test]
+async fn load_balancing_stops_waiting_for_a_silent_server() {
+    let silent = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let working = Fixture::start().await;
+    let mut options = ServerOptions::new(vec![silent.local_addr().unwrap(), working.addr]);
+    options.load_balance = true;
+    let server = start_server(options).await;
+
+    // Every query is answered, though it takes a couple of timeouts to notice the silent server.
+    for _ in 0..4 {
+        let response = ask(server, "a.fixture.test.", RecordType::A).await;
+        assert_eq!(response.metadata.response_code, ResponseCode::NoError);
+    }
+    let started = Instant::now();
+    for _ in 0..10 {
+        let response = ask(server, "a.fixture.test.", RecordType::A).await;
+        assert_eq!(response.metadata.response_code, ResponseCode::NoError);
+    }
+    assert!(
+        started.elapsed() < Duration::from_millis(200),
+        "ten queries took {:?}, so at least one waited for the silent server",
+        started.elapsed()
+    );
+}

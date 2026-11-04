@@ -17,6 +17,11 @@ COPY tests/ tests/
 COPY migrations/ migrations/
 COPY --from=ui /src/frontend/dist frontend/dist
 RUN cargo build --release --locked --package node-bin
+# Docker doesn't pass --cap-add on to a non-root process, so the binary carries the capability itself.
+# It's what lets the node answer on ports 53 and 123. Starting the image requires NET_BIND_SERVICE
+# to be allowed, which it is by default, and no-new-privileges would make the kernel ignore it.
+RUN apt-get update && apt-get install -y --no-install-recommends libcap2-bin \
+    && setcap cap_net_bind_service=+ep target/release/ferrixdns
 RUN mkdir -p /data && chown 65532:65532 /data
 
 # Distroless has no shell or package manager, so there's little for an attacker to use.
@@ -31,7 +36,7 @@ ENV FERRIXDNS_WEB_TLS_SELF_SIGNED=true
 # Containers see traffic from their network's gateway unless they use host networking.
 ENV FERRIXDNS_HEALTH_ADDRESS=127.0.0.1:53
 VOLUME /data
-EXPOSE 53/udp 53/tcp 8443/tcp
+EXPOSE 53/udp 53/tcp 123/udp 8443/tcp
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s CMD ["/usr/bin/ferrixdns", "health"]
 ENTRYPOINT ["/usr/bin/ferrixdns"]
 CMD ["serve"]

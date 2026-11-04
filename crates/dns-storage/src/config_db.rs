@@ -47,6 +47,16 @@ pub struct ListStatus {
     pub invalid_line_count: i64,
 }
 
+/// A device seen on the network.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct NetworkDevice {
+    pub mac: String,
+    pub addresses: Vec<String>,
+    pub hostname: Option<String>,
+    pub first_seen_ms: i64,
+    pub last_seen_ms: i64,
+}
+
 /// A recorded administrative action.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AuditEvent {
@@ -308,6 +318,71 @@ impl ConfigDb {
         Ok(())
     }
 
+    /// Records devices seen now. Addresses and the host name are replaced, and only a known host
+    /// name replaces the old one, so a failed lookup doesn't lose it.
+    pub async fn record_network_devices(
+        &self,
+        devices: &[NetworkDevice],
+    ) -> Result<(), ConfigDbError> {
+        let mut transaction = self.pool.begin().await?;
+        for device in devices {
+            sqlx::query(
+                "INSERT INTO network_devices \
+                 (mac, addresses, hostname, first_seen_ms, last_seen_ms) VALUES (?, ?, ?, ?, ?) \
+                 ON CONFLICT(mac) DO UPDATE SET addresses = excluded.addresses, \
+                 hostname = COALESCE(excluded.hostname, hostname), \
+                 last_seen_ms = MAX(last_seen_ms, excluded.last_seen_ms)",
+            )
+            .bind(&device.mac)
+            .bind(device.addresses.join(","))
+            .bind(&device.hostname)
+            .bind(device.first_seen_ms)
+            .bind(device.last_seen_ms)
+            .execute(&mut *transaction)
+            .await?;
+        }
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    /// Devices seen since a time, most recent first.
+    pub async fn network_devices(
+        &self,
+        since_ms: i64,
+    ) -> Result<Vec<NetworkDevice>, ConfigDbError> {
+        let rows = sqlx::query(
+            "SELECT * FROM network_devices WHERE last_seen_ms >= ? ORDER BY last_seen_ms DESC",
+        )
+        .bind(since_ms)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter()
+            .map(|row| {
+                let addresses: String = row.try_get("addresses")?;
+                Ok(NetworkDevice {
+                    mac: row.try_get("mac")?,
+                    addresses: addresses
+                        .split(',')
+                        .filter(|address| !address.is_empty())
+                        .map(ToOwned::to_owned)
+                        .collect(),
+                    hostname: row.try_get("hostname")?,
+                    first_seen_ms: row.try_get("first_seen_ms")?,
+                    last_seen_ms: row.try_get("last_seen_ms")?,
+                })
+            })
+            .collect()
+    }
+
+    /// Forgets devices not seen since a time.
+    pub async fn forget_network_devices(&self, before_ms: i64) -> Result<(), ConfigDbError> {
+        sqlx::query("DELETE FROM network_devices WHERE last_seen_ms < ?")
+            .bind(before_ms)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     pub async fn list_statuses(&self) -> Result<Vec<ListStatus>, ConfigDbError> {
         let rows = sqlx::query("SELECT * FROM list_status")
             .fetch_all(&self.pool)
@@ -506,5 +581,39 @@ mod tests {
         let events = db.recent_audit_events(2).await.unwrap();
         assert_eq!(events[0].id, "b");
         assert_eq!(events[1].id, "c");
+    }
+
+    #[tokio::test]
+    async fn network_devices_keep_their_first_sighting_and_known_host_name() {
+        let directory = tempfile::tempdir().unwrap();
+        let db = ConfigDb::open(&directory.path().join("config.db"))
+            .await
+            .unwrap();
+        let device = |addresses: &[&str], hostname: Option<&str>, seen: i64| NetworkDevice {
+            mac: "aa:bb:cc:00:00:01".to_owned(),
+            addresses: addresses.iter().map(ToString::to_string).collect(),
+            hostname: hostname.map(ToOwned::to_owned),
+            first_seen_ms: seen,
+            last_seen_ms: seen,
+        };
+        db.record_network_devices(&[device(&["192.168.1.2"], Some("a.lan"), 100)])
+            .await
+            .unwrap();
+        db.record_network_devices(&[device(&["192.168.1.3", "fd00::3"], None, 200)])
+            .await
+            .unwrap();
+
+        let saved = db.network_devices(0).await.unwrap();
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].addresses, ["192.168.1.3", "fd00::3"]);
+        assert_eq!(saved[0].hostname.as_deref(), Some("a.lan"));
+        assert_eq!(saved[0].first_seen_ms, 100);
+        assert_eq!(saved[0].last_seen_ms, 200);
+
+        assert!(db.network_devices(201).await.unwrap().is_empty());
+        db.forget_network_devices(200).await.unwrap();
+        assert_eq!(db.network_devices(0).await.unwrap().len(), 1);
+        db.forget_network_devices(201).await.unwrap();
+        assert!(db.network_devices(0).await.unwrap().is_empty());
     }
 }

@@ -160,6 +160,57 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/blocking": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Whether blocking is paused, and until when. */
+        get: operations["get_blocking"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/blocking/pause": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Pauses all blocking for a set time, except emergency denies. A restart also ends the pause. */
+        post: operations["pause_blocking"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/blocking/resume": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Ends a pause, so blocking applies again now. */
+        post: operations["resume_blocking"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/clients": {
         parameters: {
             query?: never;
@@ -246,6 +297,42 @@ export interface paths {
         options?: never;
         head?: never;
         patch?: never;
+        trace?: never;
+    };
+    "/api/v1/dns/forwarders": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Domains and networks that go to specific servers. */
+        get: operations["list_forwarders"];
+        put?: never;
+        /** Sends some domains and reverse lookups to specific servers, active as soon as this returns. */
+        post: operations["create_forwarder"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/dns/forwarders/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Stops forwarding a zone's names to its servers. */
+        delete: operations["delete_forwarder"];
+        options?: never;
+        head?: never;
+        /** Changes a forward zone. */
+        patch: operations["update_forwarder"];
         trace?: never;
     };
     "/api/v1/dns/records": {
@@ -494,6 +581,75 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/network/devices": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Devices on the network or asking this node, with the client each one counts as. */
+        get: operations["list_network_devices"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/node-settings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The node's own settings, such as its addresses and upstreams. */
+        get: operations["get_node_settings"];
+        /** Saves the node's own settings and restarts it to use them. */
+        put: operations["put_node_settings"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/node-settings/confirm": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Keeps a change to how the dashboard is reached, before it undoes itself. */
+        post: operations["confirm_node_settings"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/node-settings/undo": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Undoes a change to how the dashboard is reached and restarts the node. */
+        post: operations["undo_node_settings"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/overview": {
         parameters: {
             query?: never;
@@ -657,6 +813,14 @@ export interface components {
         };
         /** @enum {string} */
         BlockResponseDto: "nxdomain" | "zero_address";
+        /** @description Whether blocking is paused. */
+        BlockingDto: {
+            paused: boolean;
+            /** @description When blocking resumes. */
+            paused_until?: string | null;
+            /** Format: int64 */
+            remaining_seconds: number;
+        };
         BucketDto: {
             /** Format: int64 */
             blocked: number;
@@ -692,10 +856,12 @@ export interface components {
         ClientDto: {
             addresses: string[];
             groups: string[];
+            hostnames: string[];
             /** @description The client's ID, or its address if it hasn't been named. */
             id: string;
             known: boolean;
             last_seen_at?: string | null;
+            macs: string[];
             name?: string | null;
             /**
              * Format: int64
@@ -709,9 +875,16 @@ export interface components {
             name: string;
         };
         CreateClient: {
-            addresses: string[];
+            addresses?: string[];
             groups?: string[];
+            hostnames?: string[];
+            macs?: string[];
             name: string;
+        };
+        CreateForwardZone: {
+            load_balance?: boolean;
+            servers: string[];
+            zones: string[];
         };
         CreateGroup: {
             description?: string | null;
@@ -758,6 +931,17 @@ export interface components {
             source: string;
         };
         /** @description A single resource. */
+        Envelope_BlockingDto: {
+            /** @description Whether blocking is paused. */
+            data: {
+                paused: boolean;
+                /** @description When blocking resumes. */
+                paused_until?: string | null;
+                /** Format: int64 */
+                remaining_seconds: number;
+            };
+        };
+        /** @description A single resource. */
         Envelope_CacheDto: {
             /** @description The answer cache's size and hit counts since the node started. */
             data: {
@@ -779,16 +963,32 @@ export interface components {
             data: {
                 addresses: string[];
                 groups: string[];
+                hostnames: string[];
                 /** @description The client's ID, or its address if it hasn't been named. */
                 id: string;
                 known: boolean;
                 last_seen_at?: string | null;
+                macs: string[];
                 name?: string | null;
                 /**
                  * Format: int64
                  * @description Queries in the last 7 days.
                  */
                 query_count: number;
+            };
+        };
+        /** @description A single resource. */
+        Envelope_ForwardZoneDto: {
+            /** @description Names that go to specific servers instead of the default upstreams. */
+            data: {
+                id: string;
+                /** @description Shares queries between the servers, instead of using the first one that works. */
+                load_balance: boolean;
+                servers: string[];
+                /** @description What's been seen from these servers since the node started. Empty until they're used. */
+                stats: components["schemas"]["UpstreamDto"][];
+                /** @description Domains, or networks whose reverse lookups go to these servers. */
+                zones: string[];
             };
         };
         /** @description A single resource. */
@@ -851,6 +1051,23 @@ export interface components {
             data: {
                 name: string;
                 record_count: number;
+            };
+        };
+        /** @description A single resource. */
+        Envelope_NodeSettingsView: {
+            /** @description The node's own settings, and how a change to them is going. */
+            data: {
+                /** @description Different each time the node starts. */
+                boot_id: string;
+                /** @description Which settings differ from the startup values. */
+                changed: string[];
+                /** @description Why the last change was undone. */
+                last_failure?: string | null;
+                pending?: components["schemas"]["PendingNodeChange"] | null;
+                /** @description The saved values, which the node uses from its next start. */
+                settings: components["schemas"]["NodeSettings"];
+                /** @description The values from the command line and environment, without any changes from here. */
+                startup: components["schemas"]["NodeSettings"];
             };
         };
         /** @description A single resource. */
@@ -928,6 +1145,15 @@ export interface components {
             };
         };
         /** @description A single resource. */
+        Envelope_SaveNodeSettingsResponse: {
+            /** @description The result of saving the node's settings. */
+            data: {
+                /** @description Whether the node is restarting to use them. */
+                restarting: boolean;
+                view: components["schemas"]["NodeSettingsView"];
+            };
+        };
+        /** @description A single resource. */
         Envelope_SessionInfo: {
             data: {
                 /** @description Send this in the `X-CSRF-Token` header on requests that change anything. */
@@ -949,6 +1175,14 @@ export interface components {
                 /** Format: int64 */
                 query_history_max_bytes: number;
                 query_log_mode: components["schemas"]["QueryLogModeDto"];
+                /** @description Addresses or networks with no limit. */
+                rate_limit_exempt: string[];
+                /**
+                 * Format: int32
+                 * @description Queries per minute for each client address, which is also the largest burst. 0 turns the
+                 *     limit off.
+                 */
+                rate_limit_queries_per_minute: number;
             };
         };
         /** @description A single resource. */
@@ -961,6 +1195,7 @@ export interface components {
                 /** Format: int64 */
                 events_dropped: number;
                 list_count: number;
+                ntp?: components["schemas"]["NtpStatusDto"] | null;
                 policy_read_only: boolean;
                 policy_revision: string;
                 policy_warnings: string[];
@@ -970,6 +1205,11 @@ export interface components {
                 query_history_bytes: number;
                 /** Format: int64 */
                 query_history_retained_seconds: number;
+                /**
+                 * Format: int64
+                 * @description Queries refused for being over a client's limit, since the node started.
+                 */
+                rate_limited_queries: number;
                 rule_count: number;
                 telemetry_available: boolean;
                 /** Format: int64 */
@@ -1025,16 +1265,31 @@ export interface components {
             data: {
                 addresses: string[];
                 groups: string[];
+                hostnames: string[];
                 /** @description The client's ID, or its address if it hasn't been named. */
                 id: string;
                 known: boolean;
                 last_seen_at?: string | null;
+                macs: string[];
                 name?: string | null;
                 /**
                  * Format: int64
                  * @description Queries in the last 7 days.
                  */
                 query_count: number;
+            }[];
+        };
+        /** @description A single resource. */
+        Envelope_Vec_ForwardZoneDto: {
+            data: {
+                id: string;
+                /** @description Shares queries between the servers, instead of using the first one that works. */
+                load_balance: boolean;
+                servers: string[];
+                /** @description What's been seen from these servers since the node started. Empty until they're used. */
+                stats: components["schemas"]["UpstreamDto"][];
+                /** @description Domains, or networks whose reverse lookups go to these servers. */
+                zones: string[];
             }[];
         };
         /** @description A single resource. */
@@ -1089,6 +1344,32 @@ export interface components {
             }[];
         };
         /** @description A single resource. */
+        Envelope_Vec_NetworkDeviceDto: {
+            data: {
+                addresses: string[];
+                /** @description The named client this device counts as. */
+                client_id?: string | null;
+                client_name?: string | null;
+                first_seen_at?: string | null;
+                groups: string[];
+                hostname?: string | null;
+                /** @description Its MAC address, or its IP address if the MAC isn't known. */
+                id: string;
+                last_active_at?: string | null;
+                last_query_at?: string | null;
+                mac?: string | null;
+                /** @description Whether the kernel's neighbor table lists it right now. */
+                on_network: boolean;
+                /**
+                 * Format: int64
+                 * @description Queries in the last 7 days, when they can be told apart from other devices'.
+                 */
+                query_count?: number | null;
+                /** @description Whether it's over its query limit right now. */
+                rate_limited: boolean;
+            }[];
+        };
+        /** @description A single resource. */
         Envelope_Vec_RevisionDto: {
             data: {
                 active: boolean;
@@ -1140,6 +1421,17 @@ export interface components {
         /** @description The error body shared by every endpoint. */
         ErrorEnvelope: {
             error: components["schemas"]["ErrorBody"];
+        };
+        /** @description Names that go to specific servers instead of the default upstreams. */
+        ForwardZoneDto: {
+            id: string;
+            /** @description Shares queries between the servers, instead of using the first one that works. */
+            load_balance: boolean;
+            servers: string[];
+            /** @description What's been seen from these servers since the node started. Empty until they're used. */
+            stats: components["schemas"]["UpstreamDto"][];
+            /** @description Domains, or networks whose reverse lookups go to these servers. */
+            zones: string[];
         };
         GroupDto: {
             client_count: number;
@@ -1203,6 +1495,88 @@ export interface components {
         };
         /** @enum {string} */
         MatchTypeDto: "exact" | "suffix" | "regex";
+        /** @description A device seen on the network or asking this node. */
+        NetworkDeviceDto: {
+            addresses: string[];
+            /** @description The named client this device counts as. */
+            client_id?: string | null;
+            client_name?: string | null;
+            first_seen_at?: string | null;
+            groups: string[];
+            hostname?: string | null;
+            /** @description Its MAC address, or its IP address if the MAC isn't known. */
+            id: string;
+            last_active_at?: string | null;
+            last_query_at?: string | null;
+            mac?: string | null;
+            /** @description Whether the kernel's neighbor table lists it right now. */
+            on_network: boolean;
+            /**
+             * Format: int64
+             * @description Queries in the last 7 days, when they can be told apart from other devices'.
+             */
+            query_count?: number | null;
+            /** @description Whether it's over its query limit right now. */
+            rate_limited: boolean;
+        };
+        /** @description Every setting of the node that can be changed from the dashboard. */
+        NodeSettings: {
+            allow: string[];
+            allow_private_list_urls: boolean;
+            /** Format: int64 */
+            attempt_timeout_ms: number;
+            /** Format: int64 */
+            cache_max_ttl: number;
+            /** Format: int64 */
+            cache_mib: number;
+            /** Format: int64 */
+            cache_negative_ttl: number;
+            dnssec_validate: boolean;
+            listen: string[];
+            /** @description What the node logs, in the format of `RUST_LOG`. */
+            log_filter: string;
+            /** Format: int64 */
+            max_concurrent_requests: number;
+            ntp_listen: string[];
+            policy_file?: string | null;
+            /** Format: int64 */
+            query_timeout_ms: number;
+            /** @description Where the node keeps its data. Moving it copies the data at the next start. */
+            state_dir: string;
+            /** @description Shares queries between the upstreams, instead of using the first one that works. */
+            upstream_load_balance: boolean;
+            upstreams: string[];
+            web_hosts: string[];
+            web_insecure_remote: boolean;
+            web_listen: string;
+            web_tls_cert?: string | null;
+            web_tls_key?: string | null;
+            web_tls_mode: components["schemas"]["WebTlsMode"];
+        };
+        /** @description The node's own settings, and how a change to them is going. */
+        NodeSettingsView: {
+            /** @description Different each time the node starts. */
+            boot_id: string;
+            /** @description Which settings differ from the startup values. */
+            changed: string[];
+            /** @description Why the last change was undone. */
+            last_failure?: string | null;
+            pending?: components["schemas"]["PendingNodeChange"] | null;
+            /** @description The saved values, which the node uses from its next start. */
+            settings: components["schemas"]["NodeSettings"];
+            /** @description The values from the command line and environment, without any changes from here. */
+            startup: components["schemas"]["NodeSettings"];
+        };
+        /** @description The state of this node's NTP server. */
+        NtpStatusDto: {
+            /** @description `synchronized`, `unsynchronized` or `unknown`. */
+            clock: string;
+            listeners: string[];
+            /** Format: int64 */
+            requests_limited: number;
+            /** Format: int64 */
+            requests_served: number;
+        };
         OverviewDto: {
             /** Format: int64 */
             average_latency_us: number;
@@ -1240,8 +1614,20 @@ export interface components {
             has_more: boolean;
             next_cursor?: string | null;
         };
+        PauseBlocking: {
+            /**
+             * Format: int64
+             * @description How long to pause for, up to a day.
+             */
+            seconds: number;
+        };
+        /** @description A change to how the dashboard is reached, which undoes itself unless it's kept. */
+        PendingNodeChange: {
+            /** Format: int64 */
+            seconds_left: number;
+        };
         /** @enum {string} */
-        QueryAction: "forwarded" | "cached" | "local" | "blocked" | "rejected" | "failed";
+        QueryAction: "forwarded" | "cached" | "local" | "blocked" | "rejected" | "failed" | "rate_limited";
         QueryClientDto: {
             address?: string | null;
             id?: string | null;
@@ -1313,6 +1699,12 @@ export interface components {
             scope: components["schemas"]["ScopeDto"];
             updated_at?: string | null;
         };
+        /** @description The result of saving the node's settings. */
+        SaveNodeSettingsResponse: {
+            /** @description Whether the node is restarting to use them. */
+            restarting: boolean;
+            view: components["schemas"]["NodeSettingsView"];
+        };
         /** @description Who a rule applies to. `id` is required except for global scope. */
         ScopeDto: {
             id?: string | null;
@@ -1337,6 +1729,14 @@ export interface components {
             /** Format: int64 */
             query_history_max_bytes: number;
             query_log_mode: components["schemas"]["QueryLogModeDto"];
+            /** @description Addresses or networks with no limit. */
+            rate_limit_exempt: string[];
+            /**
+             * Format: int32
+             * @description Queries per minute for each client address, which is also the largest burst. 0 turns the
+             *     limit off.
+             */
+            rate_limit_queries_per_minute: number;
         };
         SetupRequest: {
             password: string;
@@ -1352,6 +1752,7 @@ export interface components {
             /** Format: int64 */
             events_dropped: number;
             list_count: number;
+            ntp?: components["schemas"]["NtpStatusDto"] | null;
             policy_read_only: boolean;
             policy_revision: string;
             policy_warnings: string[];
@@ -1361,6 +1762,11 @@ export interface components {
             query_history_bytes: number;
             /** Format: int64 */
             query_history_retained_seconds: number;
+            /**
+             * Format: int64
+             * @description Queries refused for being over a client's limit, since the node started.
+             */
+            rate_limited_queries: number;
             rule_count: number;
             telemetry_available: boolean;
             /** Format: int64 */
@@ -1393,7 +1799,14 @@ export interface components {
         UpdateClient: {
             addresses?: string[] | null;
             groups?: string[] | null;
+            hostnames?: string[] | null;
+            macs?: string[] | null;
             name?: string | null;
+        };
+        UpdateForwardZone: {
+            load_balance?: boolean | null;
+            servers?: string[] | null;
+            zones?: string[] | null;
         };
         UpdateGroup: {
             description?: string | null;
@@ -1441,6 +1854,11 @@ export interface components {
             rcode?: string | null;
             server?: string | null;
         };
+        /**
+         * @description How the dashboard is served.
+         * @enum {string}
+         */
+        WebTlsMode: "off" | "self_signed" | "files";
     };
     responses: never;
     parameters: never;
@@ -1740,6 +2158,91 @@ export interface operations {
             };
         };
     };
+    get_blocking: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope_BlockingDto"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    pause_blocking: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PauseBlocking"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope_BlockingDto"];
+                };
+            };
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    resume_blocking: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope_BlockingDto"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
     list_clients: {
         parameters: {
             query?: never;
@@ -1989,6 +2492,132 @@ export interface operations {
                 content?: never;
             };
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    list_forwarders: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope_Vec_ForwardZoneDto"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    create_forwarder: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateForwardZone"];
+            };
+        };
+        responses: {
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope_ForwardZoneDto"];
+                };
+            };
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    delete_forwarder: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    update_forwarder: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateForwardZone"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope_ForwardZoneDto"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -2704,6 +3333,177 @@ export interface operations {
             };
         };
     };
+    list_network_devices: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope_Vec_NetworkDeviceDto"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    get_node_settings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope_NodeSettingsView"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    put_node_settings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NodeSettings"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope_SaveNodeSettingsResponse"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    confirm_node_settings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope_NodeSettingsView"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    undo_node_settings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope_NodeSettingsView"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
     overview: {
         parameters: {
             query?: never;
@@ -2757,7 +3557,7 @@ export interface operations {
                 qname: string | null;
                 /** @description A client ID or address. */
                 client: string | null;
-                /** @description `forwarded`, `cached`, `local`, `blocked`, `rejected` or `failed`. */
+                /** @description `forwarded`, `cached`, `local`, `blocked`, `rejected`, `rate_limited` or `failed`. */
                 action: string | null;
                 qtype: string | null;
                 from: string | null;

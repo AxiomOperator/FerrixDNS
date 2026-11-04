@@ -37,6 +37,8 @@ function ResultBadge({ event }: { event: QueryEvent }) {
       return <Badge tone="success">Local</Badge>;
     case "rejected":
       return <Badge tone="warning">Rejected</Badge>;
+    case "rate_limited":
+      return <Badge tone="warning">Rate limited</Badge>;
     default:
       return <Badge tone="error">Failed</Badge>;
   }
@@ -120,6 +122,8 @@ function explanation(event: QueryEvent): string {
       return "This node answered itself, from a local zone or a name reserved for local use. It wasn't sent upstream.";
     case "rejected":
       return "This node doesn't serve this kind of request, so it was refused without being forwarded.";
+    case "rate_limited":
+      return "This device went over its query limit, so this node refused its queries until it slowed down. Only the first refused query each minute is recorded. The limit is under Settings.";
     case "failed":
       return "No usable answer could be produced. The upstream servers may be unreachable or returned an error.";
     default: {
@@ -269,6 +273,7 @@ export function QueriesPage({ readOnly }: { readOnly: boolean }) {
   const [search, setSearch] = useState(filters.qname ?? "");
 
   const log = useInfiniteQuery(queries.queryLog(filters));
+  const { refetch: refetchLog } = log;
 
   function setFilter(next: QueryFilters) {
     void navigate({ search: (previous) => ({ ...previous, ...next }) as never });
@@ -288,6 +293,8 @@ export function QueriesPage({ readOnly }: { readOnly: boolean }) {
     setLiveEvents([]);
     if (!live) return;
     const source = new EventSource("/api/v1/queries/stream");
+    // Queries answered while the stream was off, or reconnecting after a restart, were never sent.
+    source.addEventListener("open", () => void refetchLog());
     source.addEventListener("query", (message) => {
       const event = JSON.parse((message as MessageEvent<string>).data) as QueryEvent;
       if (matchesFilters(event, filters)) {
@@ -295,7 +302,7 @@ export function QueriesPage({ readOnly }: { readOnly: boolean }) {
       }
     });
     return () => source.close();
-  }, [live, filters]);
+  }, [live, filters, refetchLog]);
 
   const events = useMemo(() => {
     const stored = log.data?.pages.flatMap((page) => page.data) ?? [];
@@ -366,6 +373,7 @@ export function QueriesPage({ readOnly }: { readOnly: boolean }) {
             <option value="local">Local</option>
             <option value="failed">Failed</option>
             <option value="rejected">Rejected</option>
+            <option value="rate_limited">Rate limited</option>
           </Select>
         </div>
         <div>

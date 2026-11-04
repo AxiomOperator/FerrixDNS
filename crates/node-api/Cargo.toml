@@ -20,7 +20,9 @@ dns-storage.workspace = true
 dns-telemetry.workspace = true
 dns-upstreams.workspace = true
 futures-util.workspace = true
+node-ntp.workspace = true
 hickory-proto.workspace = true
+ipnet.workspace = true
 humantime.workspace = true
 rand.workspace = true
 rustls.workspace = true
@@ -31,6 +33,7 @@ thiserror.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true
 tracing.workspace = true
+tracing-subscriber.workspace = true
 ulid.workspace = true
 utoipa.workspace = true
 

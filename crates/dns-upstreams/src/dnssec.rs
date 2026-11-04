@@ -57,6 +57,7 @@ impl PoolHandle {
             record_type: query.query_type(),
             dnssec_ok: true,
             checking_disabled: true,
+            route: 0,
         };
         if let Some(hit) = self.cache.as_ref().and_then(|cache| cache.get(&key)) {
             return DnsResponse::from_message(hit.message)

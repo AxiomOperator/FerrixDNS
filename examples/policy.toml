@@ -61,3 +61,15 @@ action = "deny"
 groups = ["kids"]
 domains = ["games.example"]
 suffixes = ["social.example"]
+
+# Send some names to specific servers, usually a router, instead of the upstreams. A network sends
+# its reverse lookups there, which is also how this node learns host names.
+# [[forward_zones]]
+# id = "router"
+# zones = ["lan", "192.168.1.0/24"]
+# servers = ["192.168.1.1"]
+
+# How many queries each address may send per minute. 0 turns this off.
+# [rate_limit]
+# queries_per_minute = 3000
+# exempt = ["127.0.0.0/8", "::1/128"]

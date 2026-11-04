@@ -1,7 +1,12 @@
 //! DNS listeners and the request path: validate, filter, admit, forward and respond.
 
+mod devices;
+mod forward;
 mod handler;
+mod neighbors;
+mod pause;
 mod policy;
+mod rate_limit;
 
 use std::future::Future;
 use std::io;
@@ -16,11 +21,16 @@ use socket2::SockRef;
 use tokio::net::{TcpListener, UdpSocket};
 use tracing::{debug, info};
 
+pub use devices::{DeviceDirectory, DeviceInfo};
+pub use forward::{ConditionalPools, validate_forward_servers};
 pub use handler::ForwardHandler;
+pub use neighbors::{Neighbor, NeighborSource};
+pub use pause::BlockingPause;
 pub use policy::{
     MutationError, PolicyExport, PolicyHandle, PolicyLoadError, PolicyManager, RevisionInfo,
     RevisionNotFound, empty_policy,
 };
+pub use rate_limit::{RateDecision, RateLimiter};
 
 const TCP_IDLE_TIMEOUT: Duration = Duration::from_secs(10);
 const TCP_RESPONSE_BUFFER: usize = 32;
@@ -45,6 +55,36 @@ pub struct RuntimeConfig {
     pub cache: Option<Arc<dns_cache::DnsCache>>,
     /// Validate answers with DNSSEC, using these trust anchors, or the root's if none are given.
     pub dnssec: Option<DnssecConfig>,
+    /// Where MAC addresses come from.
+    pub neighbors: NeighborSource,
+}
+
+/// The running parts of the DNS path that the API reports on and controls.
+#[derive(Clone)]
+pub struct Services {
+    pub pause: Arc<BlockingPause>,
+    pub rate_limiter: Arc<RateLimiter>,
+    pub devices: Arc<DeviceDirectory>,
+    pub conditional: Arc<ConditionalPools>,
+}
+
+impl Services {
+    /// Services with no DNS server attached and these known devices, for tests.
+    pub fn detached(devices: Vec<DeviceInfo>) -> Self {
+        Self {
+            pause: Arc::default(),
+            rate_limiter: Arc::default(),
+            devices: Arc::new(DeviceDirectory::fixed(devices)),
+            conditional: Arc::new(ConditionalPools::new(PoolConfig {
+                servers: Vec::new(),
+                load_balance: false,
+                attempt_timeout: Duration::from_millis(100),
+                total_timeout: Duration::from_millis(200),
+                rounds: 1,
+                trust_roots: None,
+            })),
+        }
+    }
 }
 
 /// Turns on DNSSEC validation.
@@ -119,11 +159,23 @@ pub struct DnsServer {
     server: Server<ForwardHandler>,
     local_addrs: Vec<SocketAddr>,
     pool: Arc<UpstreamPool>,
+    services: Services,
 }
 
 impl DnsServer {
     /// Binds every listener over UDP and TCP. Port 0 picks one free port for both.
     pub async fn bind(config: RuntimeConfig) -> io::Result<Self> {
+        let conditional = Arc::new(ConditionalPools::new(config.upstreams.clone()));
+        let services = Services {
+            pause: Arc::default(),
+            rate_limiter: Arc::default(),
+            devices: DeviceDirectory::start(
+                config.neighbors,
+                Arc::clone(&config.policy),
+                Arc::clone(&conditional),
+            ),
+            conditional,
+        };
         let pool = Arc::new(UpstreamPool::new(config.upstreams).map_err(io::Error::other)?);
         let validator = config.dnssec.map(|dnssec| {
             dns_upstreams::DnssecValidator::new(
@@ -132,14 +184,15 @@ impl DnsServer {
                 dnssec.trust_anchors,
             )
         });
-        let handler = ForwardHandler::new(
-            Arc::clone(&pool),
-            config.max_concurrent_requests,
-            config.policy,
-            config.telemetry,
-            config.cache,
+        let handler = ForwardHandler::new(handler::HandlerConfig {
+            pool: Arc::clone(&pool),
+            max_concurrent_requests: config.max_concurrent_requests,
+            policy: config.policy,
+            telemetry: config.telemetry,
+            cache: config.cache,
             validator,
-        );
+            services: services.clone(),
+        });
         // Allowed networks only take effect where a deny matches, so deny everything first.
         let mut server = Server::with_access(handler, deny_everything(), config.allow);
 
@@ -156,6 +209,7 @@ impl DnsServer {
             server,
             local_addrs,
             pool,
+            services,
         })
     }
 
@@ -167,6 +221,11 @@ impl DnsServer {
     /// The upstream pool, for health reporting.
     pub fn pool(&self) -> Arc<UpstreamPool> {
         Arc::clone(&self.pool)
+    }
+
+    /// The running parts of the DNS path.
+    pub fn services(&self) -> Services {
+        self.services.clone()
     }
 
     /// Serves until `shutdown` completes or a listener fails.

@@ -55,6 +55,8 @@ pub enum Outcome {
     Rejected,
     /// No usable answer could be produced.
     Failed,
+    /// Refused because the client is over its query limit.
+    RateLimited,
 }
 
 impl Outcome {
@@ -66,6 +68,7 @@ impl Outcome {
             Self::Blocked => "blocked",
             Self::Rejected => "rejected",
             Self::Failed => "failed",
+            Self::RateLimited => "rate_limited",
         }
     }
 }
@@ -111,6 +114,7 @@ pub(crate) struct Shared {
     pub(crate) directory: PathBuf,
     pub(crate) rollups_pool: SqlitePool,
     pub(crate) pending_rollups: Mutex<RollupMap>,
+    pub(crate) top_domains: Mutex<read::TopDomainsCache>,
     pub(crate) dropped: AtomicU64,
     pub(crate) write_errors: AtomicU64,
     pub(crate) recorded: AtomicU64,
@@ -174,6 +178,7 @@ impl Telemetry {
             directory,
             rollups_pool,
             pending_rollups: Mutex::default(),
+            top_domains: Mutex::default(),
             dropped: AtomicU64::new(0),
             write_errors: AtomicU64::new(0),
             recorded: AtomicU64::new(0),

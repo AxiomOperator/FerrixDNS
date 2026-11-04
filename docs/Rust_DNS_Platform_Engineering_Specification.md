@@ -1028,7 +1028,7 @@ These items are not yet resolved in this specification.
 - Measure on a real low-powered device and document reduced defaults. A 1 GiB memory cap held with lists up to 5M generated entries, on fast CPUs (`docs/performance.md`). List indexes use finite state transducers and compile on blocking threads inside the node, and a compiler subprocess hasn't been needed so far.
 - Run the arm64 build on real hardware. It's cross-compiled and passes the library tests under emulation, but its release workflow hasn't run.
 - Define DNS behavior at boot when no valid snapshot exists: fail open, fail closed or delay binding.
-- Decide how to answer reverse lookups for private addresses from a router or AD DNS. RFC 6303 names now stay local (NXDOMAIN, or a generated PTR for local records), so this needs conditional forwarding.
+- Reverse lookups for private addresses can now go to a router or AD DNS through a forward zone. Without one, RFC 6303 names still stay local (NXDOMAIN, or a generated PTR for local records), so this needs conditional forwarding.
 - Let local CNAMEs point outside local zones. They're currently limited to names the node manages, so it never has to chase one upstream.
 - Check HTTPS/SVCB alias targets and DNAME records against policy. Only CNAME targets are checked.
 - Fuzz the packet path with coverage guidance, and report DNSSEC failures in the query log. Bogus answers are currently recorded only as failed.
@@ -1043,7 +1043,7 @@ These items are not yet resolved in this specification.
 
 **Scope and contracts**
 
-- Add FRs for DNSSEC, encrypted upstreams, IPv6, conditional forwarders and import tooling, and map each to a phase.
+- Add FRs for DNSSEC, encrypted upstreams, IPv6, conditional forwarders, per-client rate limiting, device identity, NTP and import tooling, and map each to a phase.
 - Map v0.1, v1.0 and v1.5 to phases. FR-006 is P0 and packaging is in v0.1 scope, but both arrive in Phase 4.
 - Add the promised acceptance-ID mapping (§2) and make weak acceptance criteria testable.
 - Specify the rest of the `ferrixdns` CLI, including diagnostics (FR-012).
@@ -1054,7 +1054,7 @@ These items are not yet resolved in this specification.
 - Complete the node schema: API tokens and editable upstreams. Upstreams are currently set with `--upstream` and are read-only in the UI.
 - Align remaining names, such as `deny`/`blocked` and `client_ip`/`address`.
 - Add the Analytics page.
-- Add conditional forwarders, IPv6 coverage in the test matrix, and import tooling, which v1.0 lists (§1.3).
+- Add IPv6 coverage in the test matrix, and import tooling, which v1.0 lists (§1.3).
 - Verify the packaged service's `DynamicUser` on a real host. The unit's other hardening was tested under real systemd in a container, where `DynamicUser` itself can't run rootless. Verify the release workflow, which hasn't run.
 - Add SBOMs, signed artifacts and reproducible builds to releases (§8.4).
 - Decide whether to add a TypeScript linter to CI, and per-client logging exclusions (§2.1).

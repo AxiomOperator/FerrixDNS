@@ -15,7 +15,9 @@ use sha2::{Digest, Sha256};
 use tracing::warn;
 
 pub use artifacts::ArtifactStore;
-pub use config_db::{AuditEvent, ConfigDb, ConfigDbError, ListStatus, Session, User};
+pub use config_db::{
+    AuditEvent, ConfigDb, ConfigDbError, ListStatus, NetworkDevice, Session, User,
+};
 
 /// Revisions kept: the active one plus the previous two known-good revisions.
 pub const RETAINED_REVISIONS: usize = 3;

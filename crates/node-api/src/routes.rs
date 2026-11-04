@@ -3,9 +3,14 @@
 use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::path::Path as FsPath;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::node_settings::{
+    CONFIRM_WITHIN, NodeControl, NodeSettings, ParsedSettings, SettingsStoreError,
+    check_data_folder,
+};
 use axum::Json;
 use axum::extract::{ConnectInfo, Path, Query, State};
 use axum::http::header::{ETAG, SET_COOKIE};
@@ -13,10 +18,12 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{Event, KeepAlive};
 use axum::response::{IntoResponse, Response, Sse};
 use dns_policy::{
-    Action, DecisionSource, DomainName, GroupDef, ListDef, PolicyDocument, RuleDef, Scope,
+    Action, ClientDef, ClientSource, DecisionSource, DomainName, ForwardZoneDef, GroupDef, ListDef,
+    PolicyDocument, QueryLogMode, RuleDef, Scope,
 };
+use dns_runtime::DeviceInfo;
 use dns_runtime::MutationError;
-use dns_storage::{AuditEvent, sha256_hex};
+use dns_storage::{AuditEvent, NetworkDevice, sha256_hex};
 use dns_telemetry::{QueryFilter, Telemetry};
 use dns_upstreams::UpstreamRequest;
 use futures_util::{Stream, StreamExt};
@@ -37,6 +44,7 @@ use crate::refresh::spawn_refresh;
 use crate::util::{from_iso, normalize_expiry, now_ms, to_iso};
 
 const MAX_NAME_LENGTH: usize = 100;
+const RESTART_DELAY: Duration = Duration::from_millis(300);
 const MIN_LIST_REFRESH_SECONDS: u64 = 300;
 const CLIENT_ACTIVITY_WINDOW_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 
@@ -836,7 +844,9 @@ pub async fn test_rule(
 
     let (rules, lists) = policy_labels(&state.manager.document());
     let policy = state.manager.handle().load_full();
-    let decision = policy.explain(source, &name);
+    let device = state.services.devices.get(source.to_canonical());
+    let caller = device_source(source, device.as_deref());
+    let decision = policy.explain(caller, &name);
     let (rule_id, list_id) = match decision.source {
         DecisionSource::Rule(id) => (Some(id.to_owned()), None),
         DecisionSource::List(id) => (None, Some(id.to_owned())),
@@ -856,7 +866,7 @@ pub async fn test_rule(
         rule_id,
         list_id,
         client_id: policy
-            .identity(source)
+            .identity(caller)
             .map(|identity| identity.id.to_string()),
         revision: policy.revision().to_owned(),
     })))
@@ -1143,17 +1153,39 @@ pub async fn list_clients(
         .filter(|(key, _)| !known_ids.contains(key.as_str()))
         // An address now covered by a named client isn't a separate device any more.
         .filter(|(key, _)| {
-            key.parse::<IpAddr>()
-                .is_ok_and(|address| policy.identity(address).is_none())
+            key.parse::<IpAddr>().is_ok_and(|address| {
+                let device = state.services.devices.get(address);
+                policy
+                    .identity(device_source(address, device.as_deref()))
+                    .is_none()
+            })
         })
-        .map(|(key, (count, last_seen))| ClientDto {
-            id: key.clone(),
-            known: false,
-            name: None,
-            addresses: vec![key.clone()],
-            groups: vec![],
-            query_count: *count,
-            last_seen_at: Some(to_iso(*last_seen)),
+        .map(|(key, (count, last_seen))| {
+            let device = key
+                .parse::<IpAddr>()
+                .ok()
+                .and_then(|address| state.services.devices.get(address));
+            ClientDto {
+                id: key.clone(),
+                known: false,
+                name: None,
+                addresses: vec![key.clone()],
+                macs: device
+                    .as_ref()
+                    .and_then(|device| device.mac)
+                    .map(|mac| mac.to_string())
+                    .into_iter()
+                    .collect(),
+                hostnames: device
+                    .as_ref()
+                    .and_then(|device| device.hostname.as_ref())
+                    .map(|name| name.as_str().to_owned())
+                    .into_iter()
+                    .collect(),
+                groups: vec![],
+                query_count: *count,
+                last_seen_at: Some(to_iso(*last_seen)),
+            }
         })
         .collect();
     observed.sort_by_key(|client| std::cmp::Reverse(client.query_count));
@@ -1161,14 +1193,24 @@ pub async fn list_clients(
     Ok(Json(Envelope::new(clients)))
 }
 
-fn validate_client_shape(addresses: &[String]) -> ApiResult<()> {
-    if addresses.iter().all(|address| address.trim().is_empty()) {
+fn validate_client_shape(client: &ClientDef) -> ApiResult<()> {
+    let has = |values: &[String]| values.iter().any(|value| !value.trim().is_empty());
+    if !(has(&client.addresses) || has(&client.macs) || has(&client.hostnames)) {
         return Err(ApiError::invalid(
             "CLIENT_INVALID",
-            "Enter at least one address",
+            "Enter at least one address, MAC address or host name",
         ));
     }
     Ok(())
+}
+
+/// How the DNS path would see an address, with whatever's known about its device.
+fn device_source(address: IpAddr, device: Option<&DeviceInfo>) -> ClientSource<'_> {
+    ClientSource {
+        address,
+        mac: device.and_then(|device| device.mac),
+        hostname: device.and_then(|device| device.hostname.as_ref()),
+    }
 }
 
 fn clean_list(values: Vec<String>) -> Vec<String> {
@@ -1188,7 +1230,6 @@ pub async fn create_client(
     State(state): State<AppState>,
     Json(request): Json<CreateClient>,
 ) -> ApiResult<Response> {
-    validate_client_shape(&request.addresses)?;
     let name = request.name.trim().to_owned();
     if name.is_empty() || name.len() > MAX_NAME_LENGTH {
         return Err(ApiError::invalid(
@@ -1200,8 +1241,11 @@ pub async fn create_client(
         id: Ulid::generate().to_string(),
         name: Some(name),
         addresses: clean_list(request.addresses),
+        macs: clean_list(request.macs),
+        hostnames: clean_list(request.hostnames),
         groups: clean_list(request.groups),
     };
+    validate_client_shape(&client)?;
     let stored = client.clone();
     mutate(&state, move |document| {
         document.clients.push(stored);
@@ -1233,9 +1277,6 @@ pub async fn update_client(
     Path(id): Path<String>,
     Json(request): Json<UpdateClient>,
 ) -> ApiResult<Json<Envelope<ClientDto>>> {
-    if let Some(addresses) = &request.addresses {
-        validate_client_shape(addresses)?;
-    }
     let client_id = id.clone();
     let (client, _) = mutate(&state, move |document| {
         let client = document
@@ -1249,6 +1290,13 @@ pub async fn update_client(
         if let Some(addresses) = request.addresses {
             client.addresses = clean_list(addresses);
         }
+        if let Some(macs) = request.macs {
+            client.macs = clean_list(macs);
+        }
+        if let Some(hostnames) = request.hostnames {
+            client.hostnames = clean_list(hostnames);
+        }
+        validate_client_shape(client)?;
         if let Some(groups) = request.groups {
             client.groups = clean_list(groups);
         }
@@ -1596,6 +1644,477 @@ pub async fn test_upstreams(
     }))
 }
 
+// --- Pausing blocking ---
+
+const MAX_PAUSE_SECONDS: u64 = 86_400;
+
+fn blocking_dto(state: &AppState) -> BlockingDto {
+    let remaining = state.services.pause.remaining();
+    BlockingDto {
+        paused: remaining.is_some(),
+        paused_until: remaining
+            .map(|left| to_iso(now_ms() + i64::try_from(left.as_millis()).unwrap_or(i64::MAX))),
+        // Rounded up, so a pause never shows as over before it is.
+        remaining_seconds: remaining.map_or(0, |left| left.as_millis().div_ceil(1000) as u64),
+    }
+}
+
+/// Whether blocking is paused, and until when.
+#[utoipa::path(get, path = "/api/v1/blocking", responses(
+    (status = 200, body = Envelope<BlockingDto>), (status = 401, body = ErrorEnvelope),
+))]
+pub async fn get_blocking(
+    _auth: AuthSession,
+    State(state): State<AppState>,
+) -> Json<Envelope<BlockingDto>> {
+    Json(Envelope::new(blocking_dto(&state)))
+}
+
+/// Pauses all blocking for a set time, except emergency denies. A restart also ends the pause.
+#[utoipa::path(post, path = "/api/v1/blocking/pause", request_body = PauseBlocking, responses(
+    (status = 200, body = Envelope<BlockingDto>), (status = 422, body = ErrorEnvelope),
+))]
+pub async fn pause_blocking(
+    auth: AuthSession,
+    State(state): State<AppState>,
+    Json(request): Json<PauseBlocking>,
+) -> ApiResult<Json<Envelope<BlockingDto>>> {
+    if request.seconds == 0 || request.seconds > MAX_PAUSE_SECONDS {
+        return Err(ApiError::invalid(
+            "PAUSE_INVALID",
+            "Pause blocking for between 1 second and 1 day",
+        ));
+    }
+    state
+        .services
+        .pause
+        .pause(Duration::from_secs(request.seconds));
+    audit(
+        &state,
+        &auth.session.username,
+        "blocking.pause",
+        "blocking",
+        serde_json::json!({"seconds": request.seconds}),
+    )
+    .await;
+    Ok(Json(Envelope::new(blocking_dto(&state))))
+}
+
+/// Ends a pause, so blocking applies again now.
+#[utoipa::path(post, path = "/api/v1/blocking/resume", responses(
+    (status = 200, body = Envelope<BlockingDto>), (status = 401, body = ErrorEnvelope),
+))]
+pub async fn resume_blocking(
+    auth: AuthSession,
+    State(state): State<AppState>,
+) -> Json<Envelope<BlockingDto>> {
+    state.services.pause.resume();
+    audit(
+        &state,
+        &auth.session.username,
+        "blocking.resume",
+        "blocking",
+        serde_json::json!({}),
+    )
+    .await;
+    Json(Envelope::new(blocking_dto(&state)))
+}
+
+// --- Conditional forwarding ---
+
+fn forward_zone_dto(state: &AppState, zone: &ForwardZoneDef) -> ForwardZoneDto {
+    ForwardZoneDto {
+        id: zone.id.clone(),
+        zones: zone.zones.clone(),
+        servers: zone.servers.clone(),
+        load_balance: zone.load_balance,
+        stats: state
+            .services
+            .conditional
+            .stats(&zone.servers, zone.load_balance)
+            .into_iter()
+            .map(|stats| UpstreamDto {
+                server: stats.server,
+                responses: stats.responses,
+                failures: stats.failures,
+                last_latency_us: stats.last_latency_us,
+            })
+            .collect(),
+    }
+}
+
+/// Domains and networks that go to specific servers.
+#[utoipa::path(get, path = "/api/v1/dns/forwarders", responses(
+    (status = 200, body = Envelope<Vec<ForwardZoneDto>>), (status = 401, body = ErrorEnvelope),
+))]
+pub async fn list_forwarders(
+    _auth: AuthSession,
+    State(state): State<AppState>,
+) -> Json<Envelope<Vec<ForwardZoneDto>>> {
+    let document = state.manager.document();
+    Json(Envelope::new(
+        document
+            .forward_zones
+            .iter()
+            .map(|zone| forward_zone_dto(&state, zone))
+            .collect(),
+    ))
+}
+
+/// Sends some domains and reverse lookups to specific servers, active as soon as this returns.
+#[utoipa::path(post, path = "/api/v1/dns/forwarders", request_body = CreateForwardZone, responses(
+    (status = 201, body = Envelope<ForwardZoneDto>), (status = 422, body = ErrorEnvelope),
+))]
+pub async fn create_forwarder(
+    auth: AuthSession,
+    State(state): State<AppState>,
+    Json(request): Json<CreateForwardZone>,
+) -> ApiResult<Response> {
+    let zone = ForwardZoneDef {
+        id: Ulid::generate().to_string(),
+        zones: clean_list(request.zones),
+        servers: clean_list(request.servers),
+        load_balance: request.load_balance,
+    };
+    let stored = zone.clone();
+    mutate(&state, move |document| {
+        document.forward_zones.push(stored);
+        Ok(())
+    })
+    .await?;
+    audit(
+        &state,
+        &auth.session.username,
+        "forwarder.create",
+        &zone.id,
+        serde_json::json!({"zones": zone.zones, "servers": zone.servers, "load_balance": zone.load_balance}),
+    )
+    .await;
+    Ok((
+        StatusCode::CREATED,
+        Json(Envelope::new(forward_zone_dto(&state, &zone))),
+    )
+        .into_response())
+}
+
+/// Changes a forward zone.
+#[utoipa::path(patch, path = "/api/v1/dns/forwarders/{id}", params(("id" = String, Path)),
+    request_body = UpdateForwardZone, responses(
+    (status = 200, body = Envelope<ForwardZoneDto>), (status = 404, body = ErrorEnvelope),
+    (status = 422, body = ErrorEnvelope),
+))]
+pub async fn update_forwarder(
+    auth: AuthSession,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(request): Json<UpdateForwardZone>,
+) -> ApiResult<Json<Envelope<ForwardZoneDto>>> {
+    let zone_id = id.clone();
+    let (zone, _) = mutate(&state, move |document| {
+        let zone = document
+            .forward_zones
+            .iter_mut()
+            .find(|zone| zone.id == zone_id)
+            .ok_or_else(|| ApiError::not_found("That forwarding rule"))?;
+        if let Some(zones) = request.zones {
+            zone.zones = clean_list(zones);
+        }
+        if let Some(servers) = request.servers {
+            zone.servers = clean_list(servers);
+        }
+        if let Some(load_balance) = request.load_balance {
+            zone.load_balance = load_balance;
+        }
+        Ok(zone.clone())
+    })
+    .await?;
+    audit(
+        &state,
+        &auth.session.username,
+        "forwarder.update",
+        &id,
+        serde_json::json!({"zones": zone.zones, "servers": zone.servers, "load_balance": zone.load_balance}),
+    )
+    .await;
+    Ok(Json(Envelope::new(forward_zone_dto(&state, &zone))))
+}
+
+/// Stops forwarding a zone's names to its servers.
+#[utoipa::path(delete, path = "/api/v1/dns/forwarders/{id}", params(("id" = String, Path)), responses(
+    (status = 204), (status = 404, body = ErrorEnvelope),
+))]
+pub async fn delete_forwarder(
+    auth: AuthSession,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult<StatusCode> {
+    let zone_id = id.clone();
+    mutate(&state, move |document| {
+        let position = document
+            .forward_zones
+            .iter()
+            .position(|zone| zone.id == zone_id)
+            .ok_or_else(|| ApiError::not_found("That forwarding rule"))?;
+        document.forward_zones.remove(position);
+        Ok(())
+    })
+    .await?;
+    audit(
+        &state,
+        &auth.session.username,
+        "forwarder.delete",
+        &id,
+        serde_json::json!({}),
+    )
+    .await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// --- Network devices ---
+
+/// How long a device stays in the overview after it was last seen.
+const DEVICE_RETENTION_MS: i64 = 90 * 24 * 60 * 60 * 1000;
+
+/// Groups what's known by device: a MAC address can hold several IP addresses.
+fn group_devices(devices: &[Arc<DeviceInfo>]) -> HashMap<String, Vec<&DeviceInfo>> {
+    let mut groups: HashMap<String, Vec<&DeviceInfo>> = HashMap::new();
+    for device in devices {
+        let key = device
+            .mac
+            .map_or_else(|| device.address.to_string(), |mac| mac.to_string());
+        groups.entry(key).or_default().push(device);
+    }
+    groups
+}
+
+/// A device can only have its queries counted if its client covers nothing else.
+fn counts_only_this_device(client: &ClientDef) -> bool {
+    client
+        .addresses
+        .iter()
+        .all(|value| value.parse::<IpAddr>().is_ok())
+}
+
+/// Devices on the network or asking this node, with the client each one counts as.
+#[utoipa::path(get, path = "/api/v1/network/devices", responses(
+    (status = 200, body = Envelope<Vec<NetworkDeviceDto>>), (status = 401, body = ErrorEnvelope),
+))]
+pub async fn list_network_devices(
+    _auth: AuthSession,
+    State(state): State<AppState>,
+) -> ApiResult<Json<Envelope<Vec<NetworkDeviceDto>>>> {
+    let now = now_ms();
+    let activity = match &state.telemetry {
+        Some(telemetry) => telemetry
+            .client_activity(now - CLIENT_ACTIVITY_WINDOW_MS)
+            .await
+            .map_err(ApiError::internal)?,
+        None => HashMap::new(),
+    };
+    let stored = state.db.network_devices(now - DEVICE_RETENTION_MS).await?;
+    let current = state.services.devices.snapshot();
+    let limited = state.services.rate_limiter.currently_limited();
+    let document = state.manager.document();
+    let policy = state.manager.handle().load_full();
+    // With client details left out of the log, per-device counts are unknown rather than zero.
+    let keeps_clients = policy.telemetry().mode == QueryLogMode::Full;
+
+    let mut seen_addresses = HashSet::new();
+    let mut rows = Vec::new();
+    let groups = group_devices(&current);
+    let mut stored_by_mac: HashMap<&str, &NetworkDevice> = stored
+        .iter()
+        .map(|device| (device.mac.as_str(), device))
+        .collect();
+
+    for (id, group) in &groups {
+        let saved = stored_by_mac.remove(id.as_str());
+        let mut addresses: Vec<IpAddr> = group.iter().map(|device| device.address).collect();
+        addresses.sort_unstable();
+        seen_addresses.extend(addresses.iter().copied());
+        // The hostname and identity come from whichever address has the most to say.
+        let best = group.iter().max_by_key(|device| {
+            (
+                device.hostname.is_some(),
+                device.on_network,
+                device.last_active_ms,
+            )
+        });
+        let Some(best) = best else { continue };
+        let identity = policy.identity(device_source(best.address, Some(best)));
+        let client = identity.and_then(|identity| {
+            document
+                .clients
+                .iter()
+                .find(|client| client.id.as_str() == identity.id.as_ref())
+        });
+        let by_address = addresses
+            .iter()
+            .filter_map(|address| activity.get(&address.to_string()))
+            .fold((0, 0), |(count, last), (more, seen)| {
+                (count + more, i64::max(last, *seen))
+            });
+        let by_client = client
+            .filter(|client| counts_only_this_device(client))
+            .and_then(|client| activity.get(&client.id));
+        let (query_count, last_query) = match (client, by_client) {
+            (Some(_), Some((count, last))) => (Some(by_address.0 + count), Some(*last)),
+            (Some(client), None) if !counts_only_this_device(client) => (None, None),
+            _ => (
+                Some(by_address.0),
+                (by_address.1 > 0).then_some(by_address.1),
+            ),
+        };
+        rows.push(NetworkDeviceDto {
+            id: id.clone(),
+            mac: best.mac.map(|mac| mac.to_string()),
+            addresses: addresses.iter().map(ToString::to_string).collect(),
+            hostname: group
+                .iter()
+                .find_map(|device| device.hostname.as_ref())
+                .map(|name| name.as_str().to_owned())
+                .or_else(|| saved.and_then(|device| device.hostname.clone())),
+            on_network: group.iter().any(|device| device.on_network),
+            last_active_at: group
+                .iter()
+                .map(|device| device.last_active_ms)
+                .max()
+                .map(to_iso),
+            first_seen_at: saved.map(|device| to_iso(device.first_seen_ms)),
+            client_id: identity.map(|identity| identity.id.to_string()),
+            client_name: client.and_then(|client| client.name.clone()),
+            groups: identity
+                .map(|identity| identity.groups.iter().map(ToString::to_string).collect())
+                .unwrap_or_default(),
+            query_count: query_count.filter(|_| keeps_clients),
+            last_query_at: last_query.map(to_iso),
+            rate_limited: addresses.iter().any(|address| limited.contains(address)),
+        });
+    }
+
+    // Devices remembered from earlier, which aren't around now.
+    for device in stored_by_mac.into_values() {
+        let addresses: Vec<IpAddr> = device
+            .addresses
+            .iter()
+            .filter_map(|address| address.parse().ok())
+            .collect();
+        seen_addresses.extend(addresses.iter().copied());
+        let mac = device.mac.parse().ok();
+        let hostname = device
+            .hostname
+            .as_deref()
+            .and_then(|name| DomainName::parse(name).ok());
+        let identity = addresses.first().and_then(|address| {
+            policy.identity(ClientSource {
+                address: *address,
+                mac,
+                hostname: hostname.as_ref(),
+            })
+        });
+        rows.push(NetworkDeviceDto {
+            id: device.mac.clone(),
+            mac: Some(device.mac.clone()),
+            addresses: device.addresses.clone(),
+            hostname: device.hostname.clone(),
+            on_network: false,
+            last_active_at: Some(to_iso(device.last_seen_ms)),
+            first_seen_at: Some(to_iso(device.first_seen_ms)),
+            client_id: identity.map(|identity| identity.id.to_string()),
+            client_name: identity.and_then(|identity| {
+                document
+                    .clients
+                    .iter()
+                    .find(|client| client.id.as_str() == identity.id.as_ref())
+                    .and_then(|client| client.name.clone())
+            }),
+            groups: identity
+                .map(|identity| identity.groups.iter().map(ToString::to_string).collect())
+                .unwrap_or_default(),
+            query_count: None,
+            last_query_at: None,
+            rate_limited: false,
+        });
+    }
+
+    // Addresses from the query log that have nothing else known about them.
+    for (key, (count, last_seen)) in &activity {
+        let Ok(address) = key.parse::<IpAddr>() else {
+            continue;
+        };
+        if seen_addresses.contains(&address) {
+            continue;
+        }
+        rows.push(NetworkDeviceDto {
+            id: key.clone(),
+            mac: None,
+            addresses: vec![key.clone()],
+            hostname: None,
+            on_network: false,
+            last_active_at: Some(to_iso(*last_seen)),
+            first_seen_at: None,
+            client_id: None,
+            client_name: None,
+            groups: vec![],
+            query_count: Some(*count),
+            last_query_at: Some(to_iso(*last_seen)),
+            rate_limited: limited.contains(&address),
+        });
+    }
+
+    rows.sort_by(|left, right| {
+        right
+            .on_network
+            .cmp(&left.on_network)
+            .then_with(|| right.last_active_at.cmp(&left.last_active_at))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    Ok(Json(Envelope::new(rows)))
+}
+
+/// Saves the devices on the network now, so the overview remembers them after a restart.
+///
+/// With query logging reduced, the operator has asked this node to keep less about devices, so
+/// nothing is saved. What's already saved ages out as usual.
+pub async fn save_network_devices(state: &AppState) {
+    let now = now_ms();
+    if let Err(error) = state
+        .db
+        .forget_network_devices(now - DEVICE_RETENTION_MS)
+        .await
+    {
+        warn!(%error, "cannot forget old network devices");
+    }
+    if state.manager.handle().load().telemetry().mode != QueryLogMode::Full {
+        return;
+    }
+    let current = state.services.devices.snapshot();
+    let rows: Vec<NetworkDevice> = group_devices(&current)
+        .into_iter()
+        .filter(|(_, group)| group.iter().any(|device| device.mac.is_some()))
+        .map(|(mac, group)| NetworkDevice {
+            mac,
+            addresses: group
+                .iter()
+                .map(|device| device.address.to_string())
+                .collect(),
+            hostname: group
+                .iter()
+                .find_map(|device| device.hostname.as_ref())
+                .map(|name| name.as_str().to_owned()),
+            first_seen_ms: now,
+            last_seen_ms: group
+                .iter()
+                .map(|device| device.last_active_ms)
+                .max()
+                .unwrap_or(now),
+        })
+        .collect();
+    if let Err(error) = state.db.record_network_devices(&rows).await {
+        warn!(%error, "cannot save network devices");
+    }
+}
+
 // --- Local DNS ---
 
 fn normalized_name(value: &str, code: &'static str) -> ApiResult<String> {
@@ -1927,6 +2446,8 @@ fn settings_dto(document: &PolicyDocument) -> SettingsDto {
         query_log_mode: document.telemetry.mode.into(),
         query_history_days: document.telemetry.query_history_days,
         query_history_max_bytes: document.telemetry.query_history_max_bytes,
+        rate_limit_queries_per_minute: document.rate_limit.queries_per_minute,
+        rate_limit_exempt: document.rate_limit.exempt.clone(),
     }
 }
 
@@ -1961,6 +2482,8 @@ pub async fn put_settings(
         document.telemetry.mode = request.query_log_mode.into();
         document.telemetry.query_history_days = request.query_history_days;
         document.telemetry.query_history_max_bytes = request.query_history_max_bytes;
+        document.rate_limit.queries_per_minute = request.rate_limit_queries_per_minute;
+        document.rate_limit.exempt = clean_list(request.rate_limit_exempt);
         Ok(settings_dto(document))
     })
     .await?;
@@ -2174,7 +2697,276 @@ pub async fn system_status(
         telemetry_write_errors: stats.map_or(0, |stats| stats.write_errors),
         query_history_bytes: stats.map_or(0, |stats| stats.retained_bytes),
         query_history_retained_seconds: stats.map_or(0, |stats| stats.retained_seconds),
+        rate_limited_queries: state.services.rate_limiter.limited_total(),
+        ntp: state.ntp.as_ref().map(|ntp| NtpStatusDto {
+            listeners: ntp.listeners.iter().map(ToString::to_string).collect(),
+            clock: match node_ntp::current_state() {
+                node_ntp::ClockState::Synchronized { .. } => "synchronized",
+                node_ntp::ClockState::Unsynchronized => "unsynchronized",
+                node_ntp::ClockState::Unknown => "unknown",
+            }
+            .to_owned(),
+            requests_served: ntp.stats.served(),
+            requests_limited: ntp.stats.limited(),
+        }),
     }))
+}
+
+fn node_control(state: &AppState) -> ApiResult<&NodeControl> {
+    state.node.as_ref().ok_or_else(|| {
+        ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "NODE_SETTINGS_UNAVAILABLE",
+            "This node's settings can't be changed here",
+        )
+    })
+}
+
+fn settings_store_error(error: SettingsStoreError) -> ApiError {
+    match error {
+        SettingsStoreError::TrialInProgress => ApiError::new(
+            StatusCode::CONFLICT,
+            "NODE_SETTINGS_PENDING",
+            "The last change is still being tried. Keep or undo it first.",
+        ),
+        other => ApiError::internal(other),
+    }
+}
+
+fn node_settings_view(control: &NodeControl) -> ApiResult<NodeSettingsView> {
+    let saved = control.store.read().map_err(settings_store_error)?;
+    let merged = |changes| {
+        control
+            .startup
+            .with_changes(changes)
+            .map_err(ApiError::internal)
+    };
+    let settings = merged(&saved.changes)?;
+    let pending = saved
+        .trial
+        .as_ref()
+        .and_then(|trial| trial.confirm_by_ms)
+        .map(|confirm_by_ms| PendingNodeChange {
+            seconds_left: confirm_by_ms.saturating_sub(unsigned_now_ms()) / 1000,
+        });
+    Ok(NodeSettingsView {
+        changed: settings
+            .differences(&control.startup)
+            .keys()
+            .cloned()
+            .collect(),
+        settings,
+        startup: control.startup.clone(),
+        boot_id: control.boot_id.clone(),
+        pending,
+        last_failure: saved.last_failure,
+    })
+}
+
+fn unsigned_now_ms() -> u64 {
+    u64::try_from(now_ms()).unwrap_or(0)
+}
+
+fn request_restart(control: &NodeControl) {
+    // The response has to reach the browser before the listeners close.
+    let restart = control.restart.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(RESTART_DELAY).await;
+        let _ = restart.send(true);
+    });
+}
+
+/// Whether the node itself holds an address, which makes binding it here fail for no real reason.
+fn already_held(address: SocketAddr, held: &[SocketAddr]) -> bool {
+    held.iter().any(|ours| {
+        ours.port() == address.port()
+            && (ours.ip() == address.ip()
+                || ours.ip().is_unspecified()
+                || address.ip().is_unspecified())
+    })
+}
+
+/// Tries each new address now, so a port that's taken is a message instead of a failed restart.
+async fn probe_addresses(
+    state: &AppState,
+    control: &NodeControl,
+    parsed: &ParsedSettings,
+) -> Result<(), String> {
+    let mut held: Vec<SocketAddr> = state.dns_listeners.to_vec();
+    held.push(control.web_address);
+    if let Some(ntp) = &state.ntp {
+        held.extend(&ntp.listeners);
+    }
+    let is_new = |address: &SocketAddr| address.port() != 0 && !already_held(*address, &held);
+    for address in parsed.listen.iter().filter(|address| is_new(address)) {
+        dns_runtime::bind_udp_and_tcp(*address)
+            .await
+            .map_err(|error| format!("Can't use this DNS address: {error}"))?;
+    }
+    if is_new(&parsed.web_listen) {
+        tokio::net::TcpListener::bind(parsed.web_listen)
+            .await
+            .map_err(|error| {
+                format!(
+                    "Can't use the dashboard address {}: {error}",
+                    parsed.web_listen
+                )
+            })?;
+    }
+    for address in parsed.ntp_listen.iter().filter(|address| is_new(address)) {
+        tokio::net::UdpSocket::bind(address)
+            .await
+            .map_err(|error| format!("Can't use the time server address {address}: {error}"))?;
+    }
+    Ok(())
+}
+
+/// The node's own settings, such as its addresses and upstreams.
+#[utoipa::path(get, path = "/api/v1/node-settings",
+    responses((status = 200, body = Envelope<NodeSettingsView>), (status = 401, body = ErrorEnvelope)))]
+pub async fn get_node_settings(
+    _auth: AuthSession,
+    State(state): State<AppState>,
+) -> ApiResult<Json<Envelope<NodeSettingsView>>> {
+    Ok(Json(Envelope::new(node_settings_view(node_control(
+        &state,
+    )?)?)))
+}
+
+/// Saves the node's own settings and restarts it to use them.
+#[utoipa::path(put, path = "/api/v1/node-settings", request_body = NodeSettings,
+    responses(
+        (status = 200, body = Envelope<SaveNodeSettingsResponse>),
+        (status = 400, body = ErrorEnvelope),
+        (status = 401, body = ErrorEnvelope),
+        (status = 409, body = ErrorEnvelope),
+    ))]
+pub async fn put_node_settings(
+    auth: AuthSession,
+    State(state): State<AppState>,
+    Json(request): Json<NodeSettings>,
+) -> ApiResult<Json<Envelope<SaveNodeSettingsResponse>>> {
+    let control = node_control(&state)?;
+    let invalid = |message: String| ApiError::invalid("NODE_SETTINGS_INVALID", message);
+    // Reading the files a setting names can block.
+    let desired = tokio::task::spawn_blocking(move || request.validated())
+        .await
+        .map_err(ApiError::internal)?
+        .map_err(invalid)?;
+
+    let saved = control.store.read().map_err(settings_store_error)?;
+    if saved.trial.is_some() {
+        return Err(settings_store_error(SettingsStoreError::TrialInProgress));
+    }
+    let existing = control
+        .startup
+        .with_changes(&saved.changes)
+        .map_err(ApiError::internal)?;
+    if desired == existing {
+        return Ok(Json(Envelope::new(SaveNodeSettingsResponse {
+            view: node_settings_view(control)?,
+            restarting: false,
+        })));
+    }
+    desired.check_reachable_after(&existing).map_err(invalid)?;
+    if desired.state_dir != existing.state_dir {
+        let (target, current) = (desired.state_dir.clone(), existing.state_dir.clone());
+        tokio::task::spawn_blocking(move || {
+            check_data_folder(FsPath::new(&target), FsPath::new(&current))
+        })
+        .await
+        .map_err(ApiError::internal)?
+        .map_err(invalid)?;
+    }
+    let parsed = desired.parse().map_err(invalid)?;
+    probe_addresses(&state, control, &parsed)
+        .await
+        .map_err(invalid)?;
+
+    let changed: Vec<String> = desired.differences(&existing).keys().cloned().collect();
+    let confirm_by_ms = desired.changes_dashboard_access(&existing).then(|| {
+        unsigned_now_ms().saturating_add(u64::try_from(CONFIRM_WITHIN.as_millis()).unwrap_or(0))
+    });
+    control
+        .store
+        .begin(desired.differences(&control.startup), confirm_by_ms)
+        .map_err(settings_store_error)?;
+    audit(
+        &state,
+        &auth.session.username,
+        "node_settings.update",
+        "node-settings",
+        serde_json::json!({ "changed": changed }),
+    )
+    .await;
+    let view = node_settings_view(control)?;
+    request_restart(control);
+    Ok(Json(Envelope::new(SaveNodeSettingsResponse {
+        view,
+        restarting: true,
+    })))
+}
+
+/// Keeps a change to how the dashboard is reached, before it undoes itself.
+#[utoipa::path(post, path = "/api/v1/node-settings/confirm",
+    responses(
+        (status = 200, body = Envelope<NodeSettingsView>),
+        (status = 401, body = ErrorEnvelope),
+        (status = 409, body = ErrorEnvelope),
+    ))]
+pub async fn confirm_node_settings(
+    auth: AuthSession,
+    State(state): State<AppState>,
+) -> ApiResult<Json<Envelope<NodeSettingsView>>> {
+    let control = node_control(&state)?;
+    if !control.store.commit().map_err(settings_store_error)? {
+        return Err(no_pending_change());
+    }
+    audit(
+        &state,
+        &auth.session.username,
+        "node_settings.confirm",
+        "node-settings",
+        serde_json::json!({}),
+    )
+    .await;
+    Ok(Json(Envelope::new(node_settings_view(control)?)))
+}
+
+fn no_pending_change() -> ApiError {
+    ApiError::new(
+        StatusCode::CONFLICT,
+        "NODE_SETTINGS_NOT_PENDING",
+        "There's no change waiting. It may have already been undone.",
+    )
+}
+
+/// Undoes a change to how the dashboard is reached and restarts the node.
+#[utoipa::path(post, path = "/api/v1/node-settings/undo",
+    responses(
+        (status = 200, body = Envelope<NodeSettingsView>),
+        (status = 401, body = ErrorEnvelope),
+        (status = 409, body = ErrorEnvelope),
+    ))]
+pub async fn undo_node_settings(
+    auth: AuthSession,
+    State(state): State<AppState>,
+) -> ApiResult<Json<Envelope<NodeSettingsView>>> {
+    let control = node_control(&state)?;
+    if !control.store.revert(None).map_err(settings_store_error)? {
+        return Err(no_pending_change());
+    }
+    audit(
+        &state,
+        &auth.session.username,
+        "node_settings.undo",
+        "node-settings",
+        serde_json::json!({}),
+    )
+    .await;
+    let view = node_settings_view(control)?;
+    request_restart(control);
+    Ok(Json(Envelope::new(view)))
 }
 
 /// Recent administrative actions, newest first.

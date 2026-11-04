@@ -214,6 +214,56 @@ async fn logging_modes_control_what_is_kept() {
 }
 
 #[tokio::test]
+async fn a_live_overview_reuses_top_domains_until_a_recount_is_due() {
+    let (_directory, telemetry) = open().await;
+    let now_ms = || {
+        i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+        )
+        .unwrap()
+    };
+    let top = |overview: crate::Overview| {
+        let mut domains: Vec<String> = overview
+            .top_domains
+            .into_iter()
+            .map(|domain| domain.domain)
+            .collect();
+        domains.sort();
+        domains
+    };
+    let hour_ago = now_ms() - 3_600_000;
+    telemetry.record(
+        event(now_ms(), "first.example", Outcome::Forwarded),
+        QueryLogMode::Full,
+    );
+    wait_for_events(&telemetry, 1).await;
+    let first = telemetry.overview(hour_ago, now_ms()).await.unwrap();
+    assert_eq!(top(first), ["first.example"]);
+
+    telemetry.record(
+        event(now_ms(), "second.example", Outcome::Forwarded),
+        QueryLogMode::Full,
+    );
+    wait_for_events(&telemetry, 2).await;
+    let cached = telemetry.overview(hour_ago, now_ms()).await.unwrap();
+    assert_eq!(cached.total, 2, "totals stay live");
+    assert_eq!(top(cached), ["first.example"], "the last count is reused");
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let overview = telemetry.overview(hour_ago, now_ms()).await.unwrap();
+        if top(overview).len() == 2 {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "never recounted");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+#[tokio::test]
 async fn overview_totals_include_pending_and_flushed_rollups() {
     let (_directory, telemetry) = open().await;
     telemetry.record(

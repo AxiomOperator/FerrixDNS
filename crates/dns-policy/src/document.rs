@@ -11,7 +11,9 @@ use crate::compile::{
     CompileError, ListEntry, ListLayer, ListSource, MatchType, PolicySnapshot, Rule, RuleAction,
     RuleOverlay, Scope,
 };
+use crate::device::{ClientSource, MacAddress};
 use crate::evaluate::{Action, ChainOutcome, ClientContext, Decision, NameContext};
+use crate::forward::{ForwardRoute, ForwardZoneDef, ForwardZones};
 use crate::local::{LocalAnswer, LocalQuery, LocalRecordDef, LocalZoneDef, LocalZones};
 use crate::name::{DomainName, NameError};
 
@@ -23,6 +25,8 @@ const DEFAULT_BLOCK_TTL_SECONDS: u32 = 60;
 const DEFAULT_QUERY_HISTORY_DAYS: u32 = 7;
 const DEFAULT_QUERY_HISTORY_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const DEFAULT_LIST_REFRESH_SECONDS: u64 = 86_400;
+/// Queries a client may send per minute by default. It's generous, so normal bursts never hit it.
+pub const DEFAULT_RATE_LIMIT_PER_MINUTE: u32 = 3_000;
 
 /// Why a policy document was rejected.
 #[derive(Debug, Error)]
@@ -47,6 +51,14 @@ pub enum PolicyError {
         first: String,
         second: String,
     },
+    #[error("client {client_id}: invalid MAC address {value:?}")]
+    InvalidMac { client_id: String, value: String },
+    #[error("client {client_id}: invalid host name {value:?}")]
+    InvalidHostname { client_id: String, value: String },
+    #[error("{0}")]
+    Forward(String),
+    #[error("rate limit: invalid exempt network {0:?}")]
+    InvalidRateLimitExempt(String),
     #[error("list {list_id}: invalid entry {value:?}: {source}")]
     InvalidListEntry {
         list_id: String,
@@ -149,6 +161,41 @@ impl Default for TelemetryConfig {
     }
 }
 
+fn default_rate_limit() -> u32 {
+    DEFAULT_RATE_LIMIT_PER_MINUTE
+}
+
+fn default_rate_limit_exempt() -> Vec<String> {
+    vec!["127.0.0.0/8".to_owned(), "::1/128".to_owned()]
+}
+
+/// How many queries each client address may send.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RateLimitConfig {
+    /// Queries per minute for each address, which is also the largest burst. 0 turns this off.
+    #[serde(default = "default_rate_limit")]
+    pub queries_per_minute: u32,
+    /// Addresses or networks with no limit, such as a router that forwards a whole network.
+    #[serde(default = "default_rate_limit_exempt")]
+    pub exempt: Vec<String>,
+}
+
+impl Default for RateLimitConfig {
+    fn default() -> Self {
+        Self {
+            queries_per_minute: DEFAULT_RATE_LIMIT_PER_MINUTE,
+            exempt: default_rate_limit_exempt(),
+        }
+    }
+}
+
+impl RateLimitConfig {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 /// A named group that clients, rules and lists can refer to.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -158,7 +205,7 @@ pub struct GroupDef {
     pub description: Option<String>,
 }
 
-/// A known client and the addresses that identify it.
+/// A known client and what identifies it. See [`Identities::lookup`] for which match wins.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ClientDef {
@@ -166,7 +213,14 @@ pub struct ClientDef {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     /// IP addresses or CIDR networks. The most specific match wins.
+    #[serde(default)]
     pub addresses: Vec<String>,
+    /// MAC addresses, which only work for devices on this node's own network segment.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub macs: Vec<String>,
+    /// Host names found by reverse lookup. A name with no dots matches any domain.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hostnames: Vec<String>,
     #[serde(default)]
     pub groups: Vec<String>,
 }
@@ -283,6 +337,10 @@ pub struct PolicyDocument {
     pub local_zones: Vec<LocalZoneDef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub local_records: Vec<LocalRecordDef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub forward_zones: Vec<ForwardZoneDef>,
+    #[serde(default, skip_serializing_if = "RateLimitConfig::is_default")]
+    pub rate_limit: RateLimitConfig,
 }
 
 impl Default for PolicyDocument {
@@ -298,6 +356,8 @@ impl Default for PolicyDocument {
             lists: Vec::new(),
             local_zones: Vec::new(),
             local_records: Vec::new(),
+            forward_zones: Vec::new(),
+            rate_limit: RateLimitConfig::default(),
         }
     }
 }
@@ -434,6 +494,16 @@ impl PolicyDocument {
                 ));
             }
         }
+        let can_learn_hostnames = !self.forward_zones.is_empty() || !self.local_records.is_empty();
+        for client in &self.clients {
+            if !client.hostnames.is_empty() && !can_learn_hostnames {
+                warnings.push(format!(
+                    "client {} uses host names, but there's no forward zone or local record to \
+                     learn them from",
+                    client.id
+                ));
+            }
+        }
         for list in &self.lists {
             for group in &list.groups {
                 if !groups.contains(group.as_str()) {
@@ -460,6 +530,10 @@ pub struct Identity {
 pub struct Identities {
     clients: Vec<Identity>,
     exact: HashMap<IpAddr, usize>,
+    macs: HashMap<MacAddress, usize>,
+    hostnames: HashMap<Box<str>, usize>,
+    /// Host names with no domain, which match on a name's first label.
+    short_hostnames: HashMap<Box<str>, usize>,
     /// Sorted from most to least specific.
     networks: Vec<(IpNet, usize)>,
 }
@@ -468,6 +542,7 @@ impl Identities {
     fn compile(definitions: &[ClientDef]) -> Result<Self, PolicyError> {
         let mut identities = Self::default();
         let mut owners: HashMap<IpNet, &str> = HashMap::new();
+        let mut device_owners: HashMap<String, &str> = HashMap::new();
         let mut ids = HashSet::new();
 
         for (position, client) in definitions.iter().enumerate() {
@@ -502,6 +577,39 @@ impl Identities {
                     identities.networks.push((network, position));
                 }
             }
+
+            let mut claim = |value: String| match device_owners.insert(value.clone(), &client.id) {
+                Some(first) if first != client.id => Err(PolicyError::DuplicateAddress {
+                    value,
+                    first: first.to_owned(),
+                    second: client.id.clone(),
+                }),
+                _ => Ok(()),
+            };
+            for value in &client.macs {
+                let mac: MacAddress = value.parse().map_err(|_| PolicyError::InvalidMac {
+                    client_id: client.id.clone(),
+                    value: value.clone(),
+                })?;
+                claim(mac.to_string())?;
+                identities.macs.insert(mac, position);
+            }
+            for value in &client.hostnames {
+                let name = DomainName::parse(value)
+                    .ok()
+                    .filter(|name| !name.is_root())
+                    .ok_or_else(|| PolicyError::InvalidHostname {
+                        client_id: client.id.clone(),
+                        value: value.clone(),
+                    })?;
+                claim(name.as_str().to_owned())?;
+                let table = if name.as_str().contains('.') {
+                    &mut identities.hostnames
+                } else {
+                    &mut identities.short_hostnames
+                };
+                table.insert(name.as_str().into(), position);
+            }
         }
         identities
             .networks
@@ -509,16 +617,35 @@ impl Identities {
         Ok(identities)
     }
 
-    /// The client for a source address, preferring the most specific match.
-    pub fn lookup(&self, address: IpAddr) -> Option<&Identity> {
-        let address = address.to_canonical();
-        let position = self.exact.get(&address).copied().or_else(|| {
-            self.networks
-                .iter()
-                .find(|(network, _)| network.contains(&address))
-                .map(|(_, position)| *position)
-        })?;
+    /// The client for a source, from narrowest to broadest: an exact address, a MAC address, a
+    /// host name, then the longest matching network.
+    pub fn lookup<'c>(&self, source: impl Into<ClientSource<'c>>) -> Option<&Identity> {
+        let source = source.into();
+        let address = source.address.to_canonical();
+        let position = self
+            .exact
+            .get(&address)
+            .or_else(|| self.macs.get(&source.mac?))
+            .or_else(|| self.hostname_owner(source.hostname?.as_str()))
+            .copied()
+            .or_else(|| {
+                self.networks
+                    .iter()
+                    .find(|(network, _)| network.contains(&address))
+                    .map(|(_, position)| *position)
+            })?;
         self.clients.get(position)
+    }
+
+    fn hostname_owner(&self, hostname: &str) -> Option<&usize> {
+        self.hostnames.get(hostname).or_else(|| {
+            let first_label = hostname.split('.').next()?;
+            self.short_hostnames.get(first_label)
+        })
+    }
+
+    fn uses_devices(&self) -> bool {
+        !(self.macs.is_empty() && self.hostnames.is_empty() && self.short_hostnames.is_empty())
     }
 }
 
@@ -530,6 +657,16 @@ fn parse_network(value: &str) -> Option<IpNet> {
         .parse::<IpAddr>()
         .ok()
         .map(|ip| IpNet::from(ip.to_canonical()))
+}
+
+/// Which rules a check applies.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Filtering {
+    /// Everything: rules and lists.
+    #[default]
+    Normal,
+    /// Only emergency denies, while blocking is paused.
+    EmergencyOnly,
 }
 
 /// The result of checking a name or an answer against policy.
@@ -555,6 +692,9 @@ pub struct CompiledPolicy {
     block: BlockConfig,
     telemetry: TelemetryConfig,
     local: LocalZones,
+    forward_zones: ForwardZones,
+    rate_limit_per_minute: u32,
+    rate_limit_exempt: Vec<IpNet>,
 }
 
 impl CompiledPolicy {
@@ -571,6 +711,9 @@ impl CompiledPolicy {
             block: BlockConfig::default(),
             telemetry: TelemetryConfig::default(),
             local: LocalZones::default(),
+            forward_zones: ForwardZones::default(),
+            rate_limit_per_minute: 0,
+            rate_limit_exempt: Vec::new(),
         }
     }
 
@@ -612,6 +755,20 @@ impl CompiledPolicy {
             block: document.block,
             telemetry: document.telemetry,
             local: LocalZones::compile(&document.local_zones, &document.local_records)?,
+            forward_zones: ForwardZones::compile(
+                &document.forward_zones,
+                document.local_zones.iter().map(|zone| zone.name.as_str()),
+            )?,
+            rate_limit_per_minute: document.rate_limit.queries_per_minute,
+            rate_limit_exempt: document
+                .rate_limit
+                .exempt
+                .iter()
+                .map(|value| {
+                    parse_network(value)
+                        .ok_or_else(|| PolicyError::InvalidRateLimitExempt(value.clone()))
+                })
+                .collect::<Result<_, _>>()?,
         })
     }
 
@@ -635,8 +792,51 @@ impl CompiledPolicy {
         self.local.answer(name, query)
     }
 
+    /// The servers for a conditionally forwarded name, if it has any.
+    pub fn forward_route(&self, name: &DomainName) -> Option<&ForwardRoute> {
+        self.forward_zones.route(name)
+    }
+
+    /// Whether any names are conditionally forwarded.
+    pub fn has_forward_zones(&self) -> bool {
+        !self.forward_zones.is_empty()
+    }
+
+    /// The per-minute query limit for an address, or `None` if it isn't limited.
+    pub fn rate_limit_for(&self, address: IpAddr) -> Option<u32> {
+        if self.rate_limit_per_minute == 0 {
+            return None;
+        }
+        let address = address.to_canonical();
+        let exempt = self
+            .rate_limit_exempt
+            .iter()
+            .any(|network| network.contains(&address));
+        (!exempt).then_some(self.rate_limit_per_minute)
+    }
+
+    /// Whether identifying this address could depend on its MAC address or host name.
+    pub fn needs_device(&self, address: IpAddr) -> bool {
+        self.identities.uses_devices()
+            && !self.identities.exact.contains_key(&address.to_canonical())
+    }
+
     /// Checks a local answer's names against rules. Subscribed lists don't apply to local names.
-    pub fn check_local(&self, source: IpAddr, answer: &LocalAnswer) -> Verdict<'_> {
+    pub fn check_local<'c>(
+        &self,
+        source: impl Into<ClientSource<'c>>,
+        answer: &LocalAnswer,
+    ) -> Verdict<'_> {
+        self.check_local_with(Filtering::Normal, source, answer)
+    }
+
+    /// Like [`Self::check_local`], applying only the rules `filtering` selects.
+    pub fn check_local_with<'c>(
+        &self,
+        filtering: Filtering,
+        source: impl Into<ClientSource<'c>>,
+        answer: &LocalAnswer,
+    ) -> Verdict<'_> {
         if !answer.policy_applies {
             return Verdict::Allow;
         }
@@ -646,9 +846,7 @@ impl CompiledPolicy {
             .unwrap_or_default();
         let context = self.context(identity, &groups);
         for (index, name) in answer.names.iter().enumerate() {
-            let decision = self
-                .snapshot
-                .evaluate(name, &context, NameContext::LocalZone);
+            let decision = self.decide(filtering, name, &context, NameContext::LocalZone);
             if decision.action == Action::Deny {
                 return if index == 0 {
                     Verdict::Block(decision)
@@ -668,13 +866,17 @@ impl CompiledPolicy {
         self.telemetry
     }
 
-    /// The known client for a source address.
-    pub fn identity(&self, source: IpAddr) -> Option<&Identity> {
+    /// The known client for a source.
+    pub fn identity<'c>(&self, source: impl Into<ClientSource<'c>>) -> Option<&Identity> {
         self.identities.lookup(source)
     }
 
     /// The full decision for a name and client, including an allow by default.
-    pub fn explain(&self, source: IpAddr, name: &DomainName) -> Decision<'_> {
+    pub fn explain<'c>(
+        &self,
+        source: impl Into<ClientSource<'c>>,
+        name: &DomainName,
+    ) -> Decision<'_> {
         let identity = self.identities.lookup(source);
         let groups: Vec<&str> = identity
             .map(|identity| identity.groups.iter().map(AsRef::as_ref).collect())
@@ -690,15 +892,27 @@ impl CompiledPolicy {
     }
 
     /// Checks a query name for a client.
-    pub fn check_query(&self, source: IpAddr, name: &DomainName) -> Verdict<'_> {
+    pub fn check_query<'c>(
+        &self,
+        source: impl Into<ClientSource<'c>>,
+        name: &DomainName,
+    ) -> Verdict<'_> {
+        self.check_query_with(Filtering::Normal, source, name)
+    }
+
+    /// Like [`Self::check_query`], applying only the rules `filtering` selects.
+    pub fn check_query_with<'c>(
+        &self,
+        filtering: Filtering,
+        source: impl Into<ClientSource<'c>>,
+        name: &DomainName,
+    ) -> Verdict<'_> {
         let identity = self.identities.lookup(source);
         let groups: Vec<&str> = identity
             .map(|identity| identity.groups.iter().map(AsRef::as_ref).collect())
             .unwrap_or_default();
         let context = self.context(identity, &groups);
-        let decision = self
-            .snapshot
-            .evaluate(name, &context, NameContext::Forwarded);
+        let decision = self.decide(filtering, name, &context, NameContext::Forwarded);
         match decision.action {
             Action::Allow => Verdict::Allow,
             Action::Deny => Verdict::Block(decision),
@@ -708,9 +922,20 @@ impl CompiledPolicy {
     /// Checks an upstream answer: the query name again, then each CNAME target.
     ///
     /// Rechecking the query name applies any policy published while upstream was answering.
-    pub fn check_answer(
+    pub fn check_answer<'c>(
         &self,
-        source: IpAddr,
+        source: impl Into<ClientSource<'c>>,
+        name: &DomainName,
+        targets: &[DomainName],
+    ) -> Verdict<'_> {
+        self.check_answer_with(Filtering::Normal, source, name, targets)
+    }
+
+    /// Like [`Self::check_answer`], applying only the rules `filtering` selects.
+    pub fn check_answer_with<'c>(
+        &self,
+        filtering: Filtering,
+        source: impl Into<ClientSource<'c>>,
         name: &DomainName,
         targets: &[DomainName],
     ) -> Verdict<'_> {
@@ -719,11 +944,25 @@ impl CompiledPolicy {
             .map(|identity| identity.groups.iter().map(AsRef::as_ref).collect())
             .unwrap_or_default();
         let context = self.context(identity, &groups);
-        let decision = self
-            .snapshot
-            .evaluate(name, &context, NameContext::Forwarded);
+        let decision = self.decide(filtering, name, &context, NameContext::Forwarded);
         if decision.action == Action::Deny {
             return Verdict::Block(decision);
+        }
+        if filtering == Filtering::EmergencyOnly {
+            if targets.len() > crate::evaluate::MAX_CNAME_CHAIN {
+                return Verdict::ChainTooDeep;
+            }
+            return targets
+                .iter()
+                .enumerate()
+                .find_map(|(target_index, target)| {
+                    let decision = self.snapshot.evaluate_emergency(target, &context)?;
+                    Some(Verdict::BlockTarget {
+                        decision,
+                        target_index,
+                    })
+                })
+                .unwrap_or(Verdict::Allow);
         }
         match self
             .snapshot
@@ -738,6 +977,29 @@ impl CompiledPolicy {
                 target_index,
             },
             ChainOutcome::TooDeep => Verdict::ChainTooDeep,
+        }
+    }
+
+    /// One name's decision. While paused, anything but an emergency deny is a default allow.
+    fn decide(
+        &self,
+        filtering: Filtering,
+        name: &DomainName,
+        context: &ClientContext<'_>,
+        name_context: NameContext,
+    ) -> Decision<'_> {
+        match filtering {
+            Filtering::Normal => self.snapshot.evaluate(name, context, name_context),
+            Filtering::EmergencyOnly => {
+                self.snapshot
+                    .evaluate_emergency(name, context)
+                    .unwrap_or(Decision {
+                        action: Action::Allow,
+                        tier: crate::evaluate::Tier::DefaultAllow,
+                        scope: None,
+                        source: crate::evaluate::DecisionSource::Default,
+                    })
+            }
         }
     }
 
@@ -1112,5 +1374,289 @@ expires_at = "2026-12-01T00:00:00Z"
         let after = CompiledPolicy::compile("rev", &document, expiry, None).unwrap();
         assert_eq!(after.next_expiry(), None);
         assert!(!blocked(&after, "10.0.0.1", "a.example"));
+    }
+
+    fn device_policy(extra: &str) -> CompiledPolicy {
+        let source = format!(
+            r#"
+schema_version = 1
+[[clients]]
+id = "tablet"
+macs = ["AA-BB-CC-00-00-01"]
+groups = ["kids"]
+[[clients]]
+id = "laptop"
+hostnames = ["laptop"]
+[[clients]]
+id = "printer"
+hostnames = ["printer.office.lan"]
+[[clients]]
+id = "static"
+addresses = ["192.168.1.9"]
+[[clients]]
+id = "network"
+addresses = ["192.168.0.0/16"]
+{extra}
+"#
+        );
+        let document = PolicyDocument::parse(&source).unwrap();
+        CompiledPolicy::compile("r", &document, SystemTime::now(), None).unwrap()
+    }
+
+    fn source<'a>(
+        address: &str,
+        mac: Option<&str>,
+        hostname: Option<&'a DomainName>,
+    ) -> ClientSource<'a> {
+        ClientSource {
+            address: address.parse().unwrap(),
+            mac: mac.map(|mac| mac.parse().unwrap()),
+            hostname,
+        }
+    }
+
+    #[test]
+    fn clients_are_identified_from_narrowest_to_broadest() {
+        let policy = device_policy("");
+        let id =
+            |source: ClientSource<'_>| policy.identity(source).map(|found| found.id.to_string());
+        let laptop = DomainName::parse("Laptop.lan.").unwrap();
+        let printer = DomainName::parse("printer.office.lan").unwrap();
+        let other = DomainName::parse("printer.lan").unwrap();
+        let mac = Some("aa:bb:cc:00:00:01");
+
+        assert_eq!(
+            id(source("192.168.1.2", mac, None)).as_deref(),
+            Some("tablet")
+        );
+        assert_eq!(
+            id(source("192.168.1.2", None, Some(&laptop))).as_deref(),
+            Some("laptop")
+        );
+        assert_eq!(
+            id(source("192.168.1.2", None, Some(&printer))).as_deref(),
+            Some("printer")
+        );
+        // A full name only matches itself, unlike a short one.
+        assert_eq!(
+            id(source("192.168.1.2", None, Some(&other))).as_deref(),
+            Some("network")
+        );
+        assert_eq!(
+            id(source("192.168.1.2", None, None)).as_deref(),
+            Some("network")
+        );
+        assert_eq!(id(source("10.0.0.2", None, None)), None);
+        // Each kind of match beats the broader ones.
+        assert_eq!(
+            id(source("192.168.1.9", mac, Some(&laptop))).as_deref(),
+            Some("static")
+        );
+        assert_eq!(
+            id(source("192.168.1.2", mac, Some(&laptop))).as_deref(),
+            Some("tablet")
+        );
+        assert!(policy.needs_device("192.168.1.2".parse().unwrap()));
+        assert!(!policy.needs_device("192.168.1.9".parse().unwrap()));
+        assert!(!CompiledPolicy::empty().needs_device("192.168.1.2".parse().unwrap()));
+    }
+
+    #[test]
+    fn bad_or_shared_device_identifiers_are_rejected() {
+        let compile = |clients: &str| {
+            let source = format!("schema_version = 1\n{clients}");
+            let document = PolicyDocument::parse(&source).unwrap();
+            CompiledPolicy::compile("r", &document, SystemTime::now(), None).map(|_| ())
+        };
+        let client = |id: &str, field: &str, value: &str| {
+            format!("[[clients]]\nid = \"{id}\"\n{field} = [\"{value}\"]\n")
+        };
+        assert!(matches!(
+            compile(&client("a", "macs", "nope")),
+            Err(PolicyError::InvalidMac { .. })
+        ));
+        assert!(matches!(
+            compile(&client("a", "hostnames", ".")),
+            Err(PolicyError::InvalidHostname { .. })
+        ));
+        let shared_mac =
+            client("a", "macs", "aa:bb:cc:dd:ee:ff") + &client("b", "macs", "AA-BB-CC-DD-EE-FF");
+        assert!(matches!(
+            compile(&shared_mac),
+            Err(PolicyError::DuplicateAddress { .. })
+        ));
+        let shared_name = client("a", "hostnames", "x.lan") + &client("b", "hostnames", "X.LAN");
+        assert!(matches!(
+            compile(&shared_name),
+            Err(PolicyError::DuplicateAddress { .. })
+        ));
+    }
+
+    #[test]
+    fn device_rules_apply_to_the_identified_client() {
+        let policy = device_policy(
+            "[[rules]]\nid = \"r\"\naction = \"deny\"\nmatch = \"exact\"\npattern = \"games.example\"\n\
+             scope = { kind = \"group\", id = \"kids\" }\n",
+        );
+        let name = DomainName::parse("games.example").unwrap();
+        let tablet = source("192.168.1.2", Some("aa:bb:cc:00:00:01"), None);
+        assert!(matches!(
+            policy.check_query(tablet, &name),
+            Verdict::Block(_)
+        ));
+        assert!(matches!(
+            policy.check_query(source("192.168.1.2", None, None), &name),
+            Verdict::Allow
+        ));
+    }
+
+    #[test]
+    fn pausing_only_keeps_emergency_denies() {
+        let document = PolicyDocument::parse(
+            r#"
+schema_version = 1
+[[rules]]
+id = "normal"
+action = "deny"
+match = "exact"
+pattern = "ads.example"
+[[rules]]
+id = "urgent"
+action = "deny"
+match = "exact"
+pattern = "malware.example"
+emergency = true
+[[lists]]
+id = "list"
+action = "deny"
+domains = ["tracker.example"]
+"#,
+        )
+        .unwrap();
+        let policy = CompiledPolicy::compile("r", &document, SystemTime::now(), None).unwrap();
+        let client: IpAddr = "192.168.1.2".parse().unwrap();
+        let name = |value: &str| DomainName::parse(value).unwrap();
+        let paused = Filtering::EmergencyOnly;
+
+        for blocked in ["ads.example", "tracker.example"] {
+            assert!(matches!(
+                policy.check_query(client, &name(blocked)),
+                Verdict::Block(_)
+            ));
+            assert_eq!(
+                policy.check_query_with(paused, client, &name(blocked)),
+                Verdict::Allow
+            );
+        }
+        assert!(matches!(
+            policy.check_query_with(paused, client, &name("malware.example")),
+            Verdict::Block(_)
+        ));
+
+        let targets = [name("ads.example"), name("malware.example")];
+        assert!(matches!(
+            policy.check_answer_with(paused, client, &name("alias.example"), &targets),
+            Verdict::BlockTarget {
+                target_index: 1,
+                ..
+            }
+        ));
+        assert_eq!(
+            policy.check_answer_with(paused, client, &name("alias.example"), &targets[..1]),
+            Verdict::Allow
+        );
+        let long = vec![name("a.example"); crate::evaluate::MAX_CNAME_CHAIN + 1];
+        assert_eq!(
+            policy.check_answer_with(paused, client, &name("alias.example"), &long),
+            Verdict::ChainTooDeep
+        );
+    }
+
+    #[test]
+    fn rate_limits_have_safe_defaults_and_stay_out_of_unchanged_documents() {
+        let document = PolicyDocument::default();
+        assert!(!document.to_toml().unwrap().contains("rate_limit"));
+        let policy = CompiledPolicy::compile("r", &document, SystemTime::now(), None).unwrap();
+        assert_eq!(
+            policy.rate_limit_for("192.168.1.2".parse().unwrap()),
+            Some(DEFAULT_RATE_LIMIT_PER_MINUTE)
+        );
+        assert_eq!(policy.rate_limit_for("127.0.0.1".parse().unwrap()), None);
+        assert_eq!(policy.rate_limit_for("::1".parse().unwrap()), None);
+        assert_eq!(
+            policy.rate_limit_for("::ffff:127.0.0.1".parse().unwrap()),
+            None
+        );
+
+        let custom = PolicyDocument::parse(
+            "schema_version = 1\n[rate_limit]\nqueries_per_minute = 60\nexempt = [\"192.168.1.1\"]\n",
+        )
+        .unwrap();
+        let policy = CompiledPolicy::compile("r", &custom, SystemTime::now(), None).unwrap();
+        assert_eq!(policy.rate_limit_for("192.168.1.1".parse().unwrap()), None);
+        assert_eq!(
+            policy.rate_limit_for("127.0.0.1".parse().unwrap()),
+            Some(60)
+        );
+        assert_eq!(
+            PolicyDocument::parse(&custom.to_toml().unwrap()).unwrap(),
+            custom
+        );
+
+        let off =
+            PolicyDocument::parse("schema_version = 1\n[rate_limit]\nqueries_per_minute = 0\n")
+                .unwrap();
+        let policy = CompiledPolicy::compile("r", &off, SystemTime::now(), None).unwrap();
+        assert_eq!(policy.rate_limit_for("192.168.1.2".parse().unwrap()), None);
+
+        let bad = PolicyDocument::parse("schema_version = 1\n[rate_limit]\nexempt = [\"nope\"]\n")
+            .unwrap();
+        assert!(matches!(
+            CompiledPolicy::compile("r", &bad, SystemTime::now(), None),
+            Err(PolicyError::InvalidRateLimitExempt(_))
+        ));
+    }
+
+    #[test]
+    fn forward_zones_compile_with_the_policy() {
+        let document = PolicyDocument::parse(
+            r#"
+schema_version = 1
+[[forward_zones]]
+id = "router"
+zones = ["lan", "192.168.1.0/24"]
+servers = ["192.168.1.1"]
+"#,
+        )
+        .unwrap();
+        let policy = CompiledPolicy::compile("r", &document, SystemTime::now(), None).unwrap();
+        assert!(policy.has_forward_zones());
+        let name = DomainName::parse("nas.lan").unwrap();
+        assert_eq!(policy.forward_route(&name).unwrap().id, "router");
+        assert_eq!(
+            PolicyDocument::parse(&document.to_toml().unwrap()).unwrap(),
+            document
+        );
+    }
+
+    #[test]
+    fn host_name_clients_warn_when_nothing_can_supply_host_names() {
+        let source = "schema_version = 1\n[[clients]]\nid = \"a\"\nhostnames = [\"x\"]\n";
+        let document = PolicyDocument::parse(source).unwrap();
+        assert!(
+            document
+                .warnings()
+                .iter()
+                .any(|warning| warning.contains("host names"))
+        );
+        let with_forward = format!(
+            "{source}[[forward_zones]]\nid = \"f\"\nzones = [\"lan\"]\nservers = [\"10.0.0.1\"]\n"
+        );
+        assert!(
+            PolicyDocument::parse(&with_forward)
+                .unwrap()
+                .warnings()
+                .is_empty()
+        );
     }
 }

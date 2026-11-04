@@ -44,6 +44,8 @@ pub struct CacheKey {
     pub record_type: RecordType,
     pub dnssec_ok: bool,
     pub checking_disabled: bool,
+    /// Which servers this came from: 0 for the default upstreams, or a forward zone's number.
+    pub route: u32,
 }
 
 #[derive(Debug)]
@@ -248,6 +250,7 @@ mod tests {
             record_type: RecordType::A,
             dnssec_ok: false,
             checking_disabled: false,
+            route: 0,
         }
     }
 

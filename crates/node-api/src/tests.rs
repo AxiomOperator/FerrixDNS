@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use dns_lists::{FetchLimits, Fetcher};
-use dns_policy::QueryLogMode;
+use dns_policy::{DomainName, QueryLogMode};
 use dns_runtime::PolicyManager;
 use dns_storage::ConfigDb;
 use dns_telemetry::{Outcome, QueryEvent, Telemetry};
@@ -33,6 +33,8 @@ struct Node {
 struct Options {
     policy_file: Option<&'static str>,
     allow_private_urls: bool,
+    services: dns_runtime::Services,
+    stored_devices: Vec<dns_storage::NetworkDevice>,
 }
 
 impl Default for Options {
@@ -40,6 +42,8 @@ impl Default for Options {
         Self {
             policy_file: None,
             allow_private_urls: true,
+            services: dns_runtime::Services::detached(vec![]),
+            stored_devices: vec![],
         }
     }
 }
@@ -59,9 +63,13 @@ async fn start_with(options: Options) -> Node {
             .unwrap(),
     );
     let db = ConfigDb::open(&state_dir.join("config.db")).await.unwrap();
+    db.record_network_devices(&options.stored_devices)
+        .await
+        .unwrap();
     let pool = Arc::new(
         UpstreamPool::new(PoolConfig {
             servers: vec!["127.0.0.1:9".parse().unwrap()],
+            load_balance: false,
             trust_roots: None,
             attempt_timeout: Duration::from_millis(50),
             total_timeout: Duration::from_millis(100),
@@ -91,6 +99,9 @@ async fn start_with(options: Options) -> Node {
         dns_listeners: vec!["127.0.0.1:53".parse().unwrap()],
         dnssec_validation: false,
         hsts: false,
+        services: options.services.clone(),
+        ntp: None,
+        node: None,
     })
     .await
     .unwrap();
@@ -690,7 +701,7 @@ async fn subscribed_lists_download_apply_and_keep_working_after_failures() {
 
     // It survives a restart, restored from the state directory.
     let restarted = PolicyManager::start(None, Some(node.state_dir.clone())).unwrap();
-    let source = "127.0.0.1".parse().unwrap();
+    let source: std::net::IpAddr = "127.0.0.1".parse().unwrap();
     let name = dns_policy::DomainName::parse("ads.example").unwrap();
     assert_eq!(
         restarted.handle().load().explain(source, &name).action,
@@ -1041,6 +1052,7 @@ async fn settings_and_revisions_support_changes_and_rollback() {
         "block_response": "zero_address", "block_ttl_seconds": 30,
         "query_log_mode": "anonymized", "query_history_days": 3,
         "query_history_max_bytes": 1_073_741_824_u64,
+        "rate_limit_queries_per_minute": 600, "rate_limit_exempt": ["192.168.1.1"],
     });
     let changed = node
         .send(Method::PUT, "/api/v1/settings", Some(update))
@@ -1059,6 +1071,7 @@ async fn settings_and_revisions_support_changes_and_rollback() {
                 "block_response": "nxdomain", "block_ttl_seconds": 100_000,
                 "query_log_mode": "full", "query_history_days": 7,
                 "query_history_max_bytes": 1,
+                "rate_limit_queries_per_minute": 0, "rate_limit_exempt": [],
             })),
         )
         .await;
@@ -1375,4 +1388,313 @@ async fn backup_endpoints_need_a_session_and_restore_respects_read_only() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::CONFLICT);
     assert_eq!(code(response).await, "POLICY_READ_ONLY");
+}
+
+#[tokio::test]
+async fn blocking_can_be_paused_for_a_set_time_and_resumed() {
+    let services = dns_runtime::Services::detached(vec![]);
+    let mut node = start_with(Options {
+        services: services.clone(),
+        ..Options::default()
+    })
+    .await;
+    assert_eq!(
+        node.get("/api/v1/blocking").await.status(),
+        StatusCode::UNAUTHORIZED
+    );
+    node.setup().await;
+
+    let idle: Value = node.get("/api/v1/blocking").await.json().await.unwrap();
+    assert_eq!(idle["data"]["paused"], false);
+    assert_eq!(idle["data"]["paused_until"], Value::Null);
+
+    for seconds in [0, 86_401] {
+        let invalid = node
+            .post("/api/v1/blocking/pause", json!({"seconds": seconds}))
+            .await;
+        assert_eq!(invalid.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+    assert!(!services.pause.is_active());
+
+    let paused: Value = node
+        .post("/api/v1/blocking/pause", json!({"seconds": 300}))
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(paused["data"]["paused"], true);
+    assert_eq!(paused["data"]["remaining_seconds"], 300);
+    assert!(paused["data"]["paused_until"].is_string());
+    assert!(services.pause.is_active());
+
+    let resumed: Value = node
+        .post("/api/v1/blocking/resume", json!({}))
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(resumed["data"]["paused"], false);
+    assert!(!services.pause.is_active());
+
+    let audit: Value = node.get("/api/v1/audit-events").await.json().await.unwrap();
+    let text = audit.to_string();
+    assert!(text.contains("blocking.pause") && text.contains("blocking.resume"));
+}
+
+#[tokio::test]
+async fn pausing_works_when_the_policy_comes_from_a_file() {
+    let mut node = start_with(Options {
+        policy_file: Some("schema_version = 1\n"),
+        ..Options::default()
+    })
+    .await;
+    node.setup().await;
+    let paused = node
+        .post("/api/v1/blocking/pause", json!({"seconds": 60}))
+        .await;
+    assert_eq!(paused.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn forward_zones_can_be_managed_with_validation() {
+    let node = signed_in().await;
+    let create = |zones: Value, servers: Value| {
+        let body = json!({"zones": zones, "servers": servers});
+        let node = &node;
+        async move { node.post("/api/v1/dns/forwarders", body).await }
+    };
+    for (zones, servers) in [
+        (json!([]), json!(["192.168.1.1"])),
+        (json!(["lan"]), json!([])),
+        (json!(["lan"]), json!(["not a server"])),
+        (json!(["192.168.1.0/25"]), json!(["192.168.1.1"])),
+        (json!(["localhost"]), json!(["192.168.1.1"])),
+    ] {
+        let rejected = create(zones, servers).await;
+        assert_eq!(rejected.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    let created = create(json!(["lan", "192.168.1.0/24"]), json!(["192.168.1.1"])).await;
+    assert_eq!(created.status(), StatusCode::CREATED);
+    let created: Value = created.json().await.unwrap();
+    let id = created["data"]["id"].as_str().unwrap().to_owned();
+    let name = DomainName::parse("nas.lan").unwrap();
+    assert!(node.manager.handle().load().forward_route(&name).is_some());
+
+    let path = format!("/api/v1/dns/forwarders/{id}");
+    let bad = node
+        .send(Method::PATCH, &path, Some(json!({"servers": ["nope"]})))
+        .await;
+    assert_eq!(bad.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let changed = node
+        .send(Method::PATCH, &path, Some(json!({"zones": ["corp"]})))
+        .await;
+    assert_eq!(changed.status(), StatusCode::OK);
+    assert!(node.manager.handle().load().forward_route(&name).is_none());
+
+    let listed: Value = node
+        .get("/api/v1/dns/forwarders")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(listed["data"][0]["zones"], json!(["corp"]));
+
+    let removed = node.send(Method::DELETE, &path, None).await;
+    assert_eq!(removed.status(), StatusCode::NO_CONTENT);
+    let missing = node.send(Method::DELETE, &path, None).await;
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn clients_can_be_identified_by_mac_and_host_name() {
+    let node = signed_in().await;
+    let empty = node
+        .post("/api/v1/clients", json!({"name": "Nothing"}))
+        .await;
+    assert_eq!(empty.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let bad_mac = node
+        .post("/api/v1/clients", json!({"name": "Bad", "macs": ["nope"]}))
+        .await;
+    assert_eq!(bad_mac.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+    let created = node
+        .post(
+            "/api/v1/clients",
+            json!({"name": "Tablet", "macs": ["AA-BB-CC-00-00-01"], "hostnames": ["tablet"]}),
+        )
+        .await;
+    assert_eq!(created.status(), StatusCode::CREATED);
+    let created: Value = created.json().await.unwrap();
+    assert_eq!(created["data"]["macs"], json!(["AA-BB-CC-00-00-01"]));
+    assert_eq!(created["data"]["addresses"], json!([]));
+
+    let id = created["data"]["id"].as_str().unwrap();
+    let cleared = node
+        .send(
+            Method::PATCH,
+            &format!("/api/v1/clients/{id}"),
+            Some(json!({"macs": [], "hostnames": []})),
+        )
+        .await;
+    assert_eq!(cleared.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+    let policy = node.manager.handle().load_full();
+    let source = dns_policy::ClientSource {
+        address: "192.168.1.2".parse().unwrap(),
+        mac: Some("aa:bb:cc:00:00:01".parse().unwrap()),
+        hostname: None,
+    };
+    assert_eq!(policy.identity(source).unwrap().id.as_ref(), id);
+}
+
+fn device(address: &str, mac: Option<&str>, hostname: Option<&str>) -> dns_runtime::DeviceInfo {
+    dns_runtime::DeviceInfo {
+        address: address.parse().unwrap(),
+        mac: mac.map(|mac| mac.parse().unwrap()),
+        hostname: hostname.map(|name| DomainName::parse(name).unwrap()),
+        on_network: mac.is_some(),
+        last_active_ms: crate::util::now_ms(),
+    }
+}
+
+#[tokio::test]
+async fn the_network_overview_merges_what_is_known_about_each_device() {
+    let now = crate::util::now_ms();
+    let services = dns_runtime::Services::detached(vec![
+        device("192.168.1.2", Some("aa:bb:cc:00:00:01"), Some("tablet.lan")),
+        device("fd00::2", Some("aa:bb:cc:00:00:01"), None),
+        device("192.168.1.3", Some("aa:bb:cc:00:00:02"), None),
+        device("192.168.1.4", None, None),
+    ]);
+    let mut node = start_with(Options {
+        services,
+        stored_devices: vec![
+            dns_storage::NetworkDevice {
+                mac: "aa:bb:cc:00:00:01".to_owned(),
+                addresses: vec!["192.168.1.2".to_owned()],
+                hostname: None,
+                first_seen_ms: now - 5_000_000,
+                last_seen_ms: now - 5_000_000,
+            },
+            dns_storage::NetworkDevice {
+                mac: "aa:bb:cc:00:00:09".to_owned(),
+                addresses: vec!["192.168.1.9".to_owned()],
+                hostname: Some("old.lan".to_owned()),
+                first_seen_ms: now - 9_000_000,
+                last_seen_ms: now - 9_000_000,
+            },
+        ],
+        ..Options::default()
+    })
+    .await;
+    assert_eq!(
+        node.get("/api/v1/network/devices").await.status(),
+        StatusCode::UNAUTHORIZED
+    );
+    node.setup().await;
+    let created = node
+        .post(
+            "/api/v1/clients",
+            json!({"name": "Tablet", "macs": ["aa:bb:cc:00:00:01"], "groups": ["kids"]}),
+        )
+        .await;
+    assert_eq!(created.status(), StatusCode::CREATED);
+
+    let listed: Value = node
+        .get("/api/v1/network/devices")
+        .await
+        .json()
+        .await
+        .unwrap();
+    let rows = listed["data"].as_array().unwrap();
+    assert_eq!(rows.len(), 4, "{rows:#?}");
+    let row = |id: &str| rows.iter().find(|row| row["id"] == id).unwrap();
+
+    let tablet = row("aa:bb:cc:00:00:01");
+    assert_eq!(tablet["addresses"], json!(["192.168.1.2", "fd00::2"]));
+    assert_eq!(tablet["hostname"], "tablet.lan");
+    assert_eq!(tablet["client_name"], "Tablet");
+    assert_eq!(tablet["groups"], json!(["kids"]));
+    assert_eq!(tablet["on_network"], true);
+    assert!(tablet["first_seen_at"].is_string());
+
+    let unnamed = row("aa:bb:cc:00:00:02");
+    assert_eq!(unnamed["client_name"], Value::Null);
+    assert_eq!(unnamed["query_count"], 0);
+
+    let without_mac = row("192.168.1.4");
+    assert_eq!(without_mac["mac"], Value::Null);
+    assert_eq!(without_mac["on_network"], false);
+
+    let remembered = row("aa:bb:cc:00:00:09");
+    assert_eq!(remembered["hostname"], "old.lan");
+    assert_eq!(remembered["on_network"], false);
+    assert_eq!(remembered["query_count"], Value::Null);
+
+    // Anything on the network now sorts above what isn't.
+    assert_eq!(rows[0]["on_network"], true);
+    assert_eq!(rows[3]["on_network"], false);
+
+    // Once client details aren't kept, counts are unknown rather than zero.
+    let settings: Value = node.get("/api/v1/settings").await.json().await.unwrap();
+    let mut anonymized = settings["data"].clone();
+    anonymized["query_log_mode"] = json!("anonymized");
+    let saved = node
+        .send(Method::PUT, "/api/v1/settings", Some(anonymized))
+        .await;
+    assert_eq!(saved.status(), StatusCode::OK);
+    let listed: Value = node
+        .get("/api/v1/network/devices")
+        .await
+        .json()
+        .await
+        .unwrap();
+    let unnamed = listed["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["id"] == "aa:bb:cc:00:00:02")
+        .unwrap();
+    assert_eq!(unnamed["query_count"], Value::Null);
+}
+
+#[tokio::test]
+async fn system_status_reports_rate_limiting() {
+    let node = signed_in().await;
+    let status: Value = node
+        .get("/api/v1/system/status")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(status["data"]["rate_limited_queries"], 0);
+    assert_eq!(status["data"]["ntp"], Value::Null);
+    let settings: Value = node.get("/api/v1/settings").await.json().await.unwrap();
+    assert_eq!(settings["data"]["rate_limit_queries_per_minute"], 3000);
+    assert_eq!(settings["data"]["rate_limit_exempt"][0], "127.0.0.0/8");
+}
+
+#[tokio::test]
+async fn node_settings_need_a_session_and_csrf_and_report_when_unavailable() {
+    let mut node = start().await;
+    let anonymous = node
+        .client
+        .get(format!("{}/api/v1/node-settings", node.base))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(anonymous.status(), StatusCode::UNAUTHORIZED);
+    let unprotected = node
+        .client
+        .put(format!("{}/api/v1/node-settings", node.base))
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unprotected.status(), StatusCode::UNAUTHORIZED);
+
+    node.setup().await;
+    let response = node.get("/api/v1/node-settings").await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
 }

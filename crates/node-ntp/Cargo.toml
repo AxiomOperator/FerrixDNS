@@ -1,0 +1,25 @@
+[package]
+name = "node-ntp"
+description = "A small NTP server that shares this machine's clock with the network."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+dns-runtime.workspace = true
+ipnet.workspace = true
+libc.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+# Reading the kernel's clock state needs one system call with no safe wrapper. Unsafe code is
+# denied rather than forbidden here, so that one call in clock.rs can be allowed explicitly.
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+expect_used = "deny"
+panic = "deny"
+unwrap_used = "deny"

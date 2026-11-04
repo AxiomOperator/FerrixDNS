@@ -1,5 +1,13 @@
 import { format, formatDistanceToNowStrict } from "date-fns";
 
+/** Splits a comma-separated field into its values. */
+export function splitList(value: string): string[] {
+  return value
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
 export function formatCount(value: number): string {
   return new Intl.NumberFormat().format(value);
 }

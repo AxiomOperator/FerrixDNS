@@ -255,6 +255,37 @@ impl PolicySnapshot {
         ChainOutcome::Allowed
     }
 
+    /// Whether an emergency deny matches a name. These keep applying while blocking is paused.
+    pub fn evaluate_emergency<'s>(
+        &'s self,
+        name: &DomainName,
+        client: &ClientContext<'_>,
+    ) -> Option<Decision<'s>> {
+        let overlay = &*self.rules;
+        let client_rules = client.client.and_then(|id| overlay.clients.get(id));
+        let group_rules = client
+            .groups
+            .iter()
+            .filter_map(|group| overlay.groups.get(*group));
+        let site_rules = client.site.and_then(|id| overlay.sites.get(id));
+        let emergency = |level: ScopeLevel, rules: &'s ScopeRules| {
+            emergency_match(rules, name).map(|id| (id, level))
+        };
+        let (id, level) = client_rules
+            .and_then(|rules| emergency(ScopeLevel::Client, rules))
+            .into_iter()
+            .chain(group_rules.filter_map(|rules| emergency(ScopeLevel::Group, rules)))
+            .chain(site_rules.and_then(|rules| emergency(ScopeLevel::Site, rules)))
+            .chain(emergency(ScopeLevel::Global, &overlay.global))
+            .min_by_key(|(id, _)| *id)?;
+        Some(Decision {
+            action: Action::Deny,
+            tier: Tier::EmergencyDeny,
+            scope: Some(level),
+            source: DecisionSource::Rule(id),
+        })
+    }
+
     fn evaluate_with<'s>(
         &'s self,
         name: &DomainName,
@@ -276,27 +307,8 @@ impl PolicySnapshot {
             .filter_map(|group| layer.groups.get(*group));
 
         // Emergency denies apply at every scope, ahead of everything else.
-        let emergency = |level: ScopeLevel, rules: &'s ScopeRules| {
-            emergency_match(rules, name).map(|id| (id, level))
-        };
-        let emergency_hit = client_rules
-            .and_then(|rules| emergency(ScopeLevel::Client, rules))
-            .into_iter()
-            .chain(
-                group_rules
-                    .clone()
-                    .filter_map(|r| emergency(ScopeLevel::Group, r)),
-            )
-            .chain(site_rules.and_then(|rules| emergency(ScopeLevel::Site, rules)))
-            .chain(emergency(ScopeLevel::Global, &overlay.global))
-            .min_by_key(|(id, _)| *id);
-        if let Some((id, level)) = emergency_hit {
-            return Decision {
-                action: Action::Deny,
-                tier: Tier::EmergencyDeny,
-                scope: Some(level),
-                source: DecisionSource::Rule(id),
-            };
+        if let Some(decision) = self.evaluate_emergency(name, client) {
+            return decision;
         }
 
         let no_lists = None::<&ListIndex>.into_iter();

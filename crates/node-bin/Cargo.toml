@@ -24,6 +24,7 @@ dns-telemetry.workspace = true
 dns-upstreams.workspace = true
 ipnet.workspace = true
 node-api.workspace = true
+node-ntp.workspace = true
 rcgen.workspace = true
 rustls.workspace = true
 tokio.workspace = true

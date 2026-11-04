@@ -1,27 +1,43 @@
 # Host networking is what lets the node see each device's real address. With published ports,
 # containers usually see every query coming from one gateway address, so per-client rules and
 # client statistics can't work.
+#
+# scripts/docker-deploy.sh builds and starts this, and fills in the address for you. To run it by hand,
+# set FERRIXDNS_ADDRESS to this machine's LAN address, or edit the default below.
 services:
   ferrixdns:
     image: ferrixdns
+    container_name: ferrixdns
     build:
       context: ../..
       dockerfile: packaging/docker/Dockerfile
     restart: unless-stopped
     network_mode: host
     read_only: true
+    # Don't add no-new-privileges. The binary gets NET_BIND_SERVICE from its file capability, because
+    # it isn't root, and that option makes the kernel ignore file capabilities.
     cap_drop: [ALL]
     cap_add: [NET_BIND_SERVICE]
-    security_opt: ["no-new-privileges:true"]
     volumes:
       - ferrixdns-data:/data
+    healthcheck:
+      test: ["CMD", "/usr/bin/ferrixdns", "health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+    # These are starting values. Settings saved in the dashboard win over them, and the health check
+    # follows a saved DNS address. See docs/operations/settings.md.
     environment:
-      # Use this machine's LAN address.
-      FERRIXDNS_LISTEN: 192.168.1.10:53
+      FERRIXDNS_LISTEN: "${FERRIXDNS_ADDRESS:-192.168.1.10}:${FERRIXDNS_DNS_PORT:-53}"
+      FERRIXDNS_WEB_LISTEN: "${FERRIXDNS_ADDRESS:-192.168.1.10}:${FERRIXDNS_WEB_PORT:-8443}"
       # Names and addresses people will use to reach the dashboard.
-      FERRIXDNS_WEB_HOST: 192.168.1.10,dns.home.arpa
-      FERRIXDNS_UPSTREAM: tls://cloudflare-dns.com@1.1.1.1,tls://dns.quad9.net@9.9.9.9
-      FERRIXDNS_HEALTH_ADDRESS: 192.168.1.10:53
+      FERRIXDNS_WEB_HOST: "${FERRIXDNS_ADDRESS:-192.168.1.10},dns.home.arpa"
+      FERRIXDNS_UPSTREAM: "${FERRIXDNS_UPSTREAM:-tls://cloudflare-dns.com@1.1.1.1,tls://dns.quad9.net@9.9.9.9}"
+      FERRIXDNS_HEALTH_ADDRESS: "${FERRIXDNS_ADDRESS:-192.168.1.10}:${FERRIXDNS_DNS_PORT:-53}"
+      # Who may query, if not just loopback and private networks. Empty means it isn't passed on.
+      FERRIXDNS_ALLOW:
+      # Uncomment to share the host's clock over NTP, if nothing else uses port 123.
+      # FERRIXDNS_NTP_LISTEN: "${FERRIXDNS_ADDRESS:-192.168.1.10}:123"
 
 volumes:
   ferrixdns-data:

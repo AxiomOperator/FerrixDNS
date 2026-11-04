@@ -3,6 +3,7 @@
 mod auth;
 mod dto;
 mod error;
+mod node_settings;
 mod refresh;
 mod routes;
 mod util;
@@ -32,6 +33,11 @@ use tracing::{info, warn};
 use utoipa::OpenApi;
 
 pub use auth::{MIN_PASSWORD_LENGTH, hash_password};
+pub use node_settings::{
+    CONFIRM_WITHIN, NodeControl, NodeSettings, ParsedSettings, SavedSettings, SettingsStore,
+    SettingsStoreError, Trial, WebTlsMode, data_dir, load_tls_files, move_data, saved_dns_address,
+    saved_log_filter, tls_server_config,
+};
 pub use routes::{BackupBuildError, build_backup};
 
 use auth::{LoginGuard, PasswordWorker, random_token};
@@ -41,6 +47,9 @@ use refresh::Jobs;
 const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self'; \
      style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; \
      font-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'";
+
+/// How often the devices on the network are saved.
+const DEVICE_SAVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// The largest backup that can be uploaded to restore.
 const MAX_BACKUP_UPLOAD: usize = 1024 * 1024 * 1024;
@@ -101,6 +110,16 @@ pub struct AppState {
     pub(crate) started: Instant,
     pub(crate) dnssec_validation: bool,
     pub(crate) hsts: bool,
+    pub(crate) services: dns_runtime::Services,
+    pub(crate) ntp: Option<NtpInfo>,
+    pub(crate) node: Option<NodeControl>,
+}
+
+/// What the API reports about the NTP server.
+#[derive(Clone)]
+pub struct NtpInfo {
+    pub listeners: Vec<SocketAddr>,
+    pub stats: Arc<node_ntp::NtpStats>,
 }
 
 impl AppState {
@@ -135,6 +154,11 @@ pub struct ApiConfig {
     /// Sends HSTS. Only use this with a certificate browsers already trust, because HSTS removes
     /// their option to click through a warning.
     pub hsts: bool,
+    pub services: dns_runtime::Services,
+    /// Present when this node serves NTP.
+    pub ntp: Option<NtpInfo>,
+    /// Present when this node's own settings can be changed from the dashboard.
+    pub node: Option<NodeControl>,
 }
 
 /// A started API: its state, plus the one-time setup token if setup is still needed.
@@ -173,6 +197,9 @@ impl Api {
             started: Instant::now(),
             dnssec_validation: config.dnssec_validation,
             hsts: config.hsts,
+            services: config.services,
+            ntp: config.ntp,
+            node: config.node,
         };
         Ok(Self { state, setup_token })
     }
@@ -194,6 +221,7 @@ impl Api {
         shutdown: impl Future<Output = ()> + Send + 'static,
     ) -> io::Result<()> {
         tokio::spawn(refresh::run_schedule(self.state.clone()));
+        tokio::spawn(save_devices(self.state.clone()));
         let app = router(self.state);
         info!(address = %listener.local_addr()?, "serving the web UI and API");
         serve(
@@ -212,6 +240,7 @@ impl Api {
         shutdown: impl Future<Output = ()> + Send + 'static,
     ) -> io::Result<()> {
         tokio::spawn(refresh::run_schedule(self.state.clone()));
+        tokio::spawn(save_devices(self.state.clone()));
         let app = router(self.state);
         info!(address = %listener.local_addr()?, "serving the web UI and API over TLS");
 
@@ -226,6 +255,13 @@ impl Api {
             .handle(handle)
             .serve(app.into_make_service_with_connect_info::<SocketAddr>())
             .await
+    }
+}
+
+async fn save_devices(state: AppState) {
+    loop {
+        tokio::time::sleep(DEVICE_SAVE_INTERVAL).await;
+        routes::save_network_devices(&state).await;
     }
 }
 
@@ -283,11 +319,29 @@ fn api_routes() -> Router<AppState> {
             "/dns/records/{id}",
             axum::routing::patch(update_record).delete(delete_record),
         )
+        .route("/blocking", get(get_blocking))
+        .route("/blocking/pause", post(pause_blocking))
+        .route("/blocking/resume", post(resume_blocking))
+        .route("/network/devices", get(list_network_devices))
+        .route(
+            "/dns/forwarders",
+            get(list_forwarders).post(create_forwarder),
+        )
+        .route(
+            "/dns/forwarders/{id}",
+            axum::routing::patch(update_forwarder).delete(delete_forwarder),
+        )
         .route("/dns/upstreams", get(list_upstreams))
         .route("/dns/upstreams/test", post(test_upstreams))
         .route("/config/revisions", get(list_revisions))
         .route("/config/activate", post(activate_revision))
         .route("/settings", get(get_settings).put(put_settings))
+        .route(
+            "/node-settings",
+            get(get_node_settings).put(put_node_settings),
+        )
+        .route("/node-settings/confirm", post(confirm_node_settings))
+        .route("/node-settings/undo", post(undo_node_settings))
         .route("/backup", post(create_backup))
         .route(
             "/backup/restore",
@@ -345,7 +399,8 @@ async fn check_host(
         return Err(ApiError::new(
             StatusCode::MISDIRECTED_REQUEST,
             "HOST_NOT_ALLOWED",
-            "This node doesn't answer to that host name. Start it with --web-host to allow it.",
+            "This node doesn't answer to that host name. Add it under Dashboard access in Settings, from an \
+             address it already answers to.",
         ));
     }
     Ok(next.run(request).await)
@@ -472,12 +527,24 @@ async fn static_asset(method: Method, uri: Uri) -> Response {
         routes::delete_record,
         routes::cache_stats,
         routes::flush_cache,
+        routes::get_blocking,
+        routes::pause_blocking,
+        routes::resume_blocking,
+        routes::list_network_devices,
+        routes::list_forwarders,
+        routes::create_forwarder,
+        routes::update_forwarder,
+        routes::delete_forwarder,
         routes::list_upstreams,
         routes::test_upstreams,
         routes::list_revisions,
         routes::activate_revision,
         routes::get_settings,
         routes::put_settings,
+        routes::get_node_settings,
+        routes::put_node_settings,
+        routes::confirm_node_settings,
+        routes::undo_node_settings,
         routes::create_backup,
         routes::restore_backup,
         routes::system_status,

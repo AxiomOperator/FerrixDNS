@@ -4,7 +4,7 @@ import { type ChildProcess, spawn } from "node:child_process";
 import dgram from "node:dgram";
 import { mkdtempSync, rmSync } from "node:fs";
 import http from "node:http";
-import { type AddressInfo } from "node:net";
+import { type AddressInfo, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { createInterface } from "node:readline";
@@ -12,7 +12,7 @@ import { fileURLToPath } from "node:url";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 
-export const RCODE = { NOERROR: 0, SERVFAIL: 2, NXDOMAIN: 3 };
+export const RCODE = { NOERROR: 0, SERVFAIL: 2, NXDOMAIN: 3, REFUSED: 5 };
 
 function encodeName(name: string): Buffer {
   const parts: Buffer[] = [];
@@ -71,61 +71,100 @@ function startListServer(lists: Map<string, string>): Promise<http.Server> {
   return new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve(server)));
 }
 
+function freePort(): Promise<number> {
+  return new Promise((resolve) => {
+    const server = createServer();
+    server.listen(0, "127.0.0.1", () => {
+      const { port } = server.address() as AddressInfo;
+      server.close(() => resolve(port));
+    });
+  });
+}
+
 export interface Node {
   webUrl: string;
   dnsPort: number;
+  ntpPort: number;
+  upstreamPort: number;
   listBaseUrl: string;
   lists: Map<string, string>;
   setupToken: string;
+  /** Sends an NTP request and returns the reply. */
+  ntp(): Promise<Buffer>;
   /** Sends an A query and returns the response code. */
   rcode(name: string): Promise<number>;
   stop(): Promise<void>;
 }
 
-export async function startNode(): Promise<Node> {
+/** A node restarts when its settings change, so the tests for that need ports that stay the same. */
+export async function startNode({ fixedPorts = false } = {}): Promise<Node> {
   const stateDir = mkdtempSync(path.join(tmpdir(), "ferrix-e2e-"));
   const upstream = await startUpstream();
   const lists = new Map<string, string>();
   const listServer = await startListServer(lists);
   const upstreamPort = (upstream.address() as AddressInfo).port;
+  const portFor = async () => (fixedPorts ? await freePort() : 0);
+  const [firstDnsPort, firstWebPort, firstNtpPort] = [await portFor(), await portFor(), await portFor()];
 
   const ferrixdns: ChildProcess = spawn(
     path.join(REPO_ROOT, "target/debug/ferrixdns"),
     [
       "serve",
-      "--listen", "127.0.0.1:0",
+      "--listen", `127.0.0.1:${firstDnsPort}`,
       "--upstream", `127.0.0.1:${upstreamPort}`,
       "--state-dir", stateDir,
-      "--web-listen", "127.0.0.1:0",
+      "--web-listen", `127.0.0.1:${firstWebPort}`,
       "--allow-private-list-urls",
+      "--ntp-listen", `127.0.0.1:${firstNtpPort}`,
     ],
     { stdio: ["ignore", "ignore", "pipe"], env: { ...process.env, NO_COLOR: "1", RUST_LOG: "info,hickory_server=warn" } },
   );
 
-  const startup = new Promise<{ dnsPort: number; webUrl: string; setupToken: string }>(
+  const startup = new Promise<{ dnsPort: number; ntpPort: number; webUrl: string; setupToken: string }>(
     (resolve, reject) => {
       let dnsPort: number | undefined;
+      let ntpPort: number | undefined;
       let webUrl: string | undefined;
       let setupToken: string | undefined;
       ferrixdns.once("exit", (code) => reject(new Error(`ferrixdns exited early with code ${code}`)));
       if (!ferrixdns.stderr) throw new Error("ferrixdns has no stderr");
       createInterface({ input: ferrixdns.stderr }).on("line", (line) => {
         dnsPort ??= Number(/listening for DNS.* address=[\d.]+:(\d+)/.exec(line)?.[1]) || undefined;
+        ntpPort ??= Number(/listening for NTP.* address=[\d.]+:(\d+)/.exec(line)?.[1]) || undefined;
         webUrl ??= /url=(http:\S+)/.exec(line)?.[1];
         setupToken ??= /setup_token=([0-9a-f]+)/.exec(line)?.[1];
-        if (dnsPort && webUrl && setupToken) resolve({ dnsPort, webUrl, setupToken });
+        if (dnsPort && ntpPort && webUrl && setupToken) resolve({ dnsPort, ntpPort, webUrl, setupToken });
       });
     },
   );
-  const { dnsPort, webUrl, setupToken } = await startup;
+  const { dnsPort, ntpPort, webUrl, setupToken } = await startup;
   ferrixdns.removeAllListeners("exit");
 
   return {
     webUrl,
     dnsPort,
+    ntpPort,
+    upstreamPort,
     lists,
     setupToken,
     listBaseUrl: `http://127.0.0.1:${(listServer.address() as AddressInfo).port}`,
+    ntp() {
+      return new Promise((resolve, reject) => {
+        const socket = dgram.createSocket("udp4");
+        const request = Buffer.alloc(48);
+        request[0] = 0x23;
+        const timer = setTimeout(() => {
+          socket.close();
+          reject(new Error("no NTP answer"));
+        }, 5000);
+        socket.on("message", (reply) => {
+          clearTimeout(timer);
+          socket.close();
+          resolve(reply);
+        });
+        socket.send(request, ntpPort, "127.0.0.1");
+      });
+    },
     rcode(name) {
       return new Promise((resolve, reject) => {
         const socket = dgram.createSocket("udp4");
