@@ -4,10 +4,11 @@ description = "The FerrixDNS node and its command-line interface."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
 publish.workspace = true
 
 [[bin]]
-name = "fx"
+name = "ferrixdns"
 path = "src/main.rs"
 
 [dependencies]

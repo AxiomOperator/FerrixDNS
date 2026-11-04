@@ -3,21 +3,21 @@
 #
 #   scripts/start.sh                 Build the UI and start the node
 #   scripts/start.sh --dev           Also run the Vite dev server, for UI hot reload
-#   scripts/start.sh -- --allow ...  Pass everything after -- to `fx serve`
+#   scripts/start.sh -- --allow ...  Pass everything after -- to `ferrixdns serve`
 #
 # Settings, with their defaults:
-#   FX_DNS_LISTEN=127.0.0.1:5300   FX_WEB_LISTEN=127.0.0.1:8080
-#   FX_UPSTREAM=1.1.1.1:53         FX_STATE_DIR=.ferrix-state
-#   FX_VITE_PORT=5173
+#   FERRIXDNS_DNS_LISTEN=127.0.0.1:5300   FERRIXDNS_WEB_LISTEN=127.0.0.1:8080
+#   FERRIXDNS_UPSTREAM=1.1.1.1:53         FERRIXDNS_STATE_DIR=.ferrix-state
+#   FERRIXDNS_VITE_PORT=5173
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
-dns_listen="${FX_DNS_LISTEN:-127.0.0.1:5300}"
-web_listen="${FX_WEB_LISTEN:-127.0.0.1:8080}"
-upstream="${FX_UPSTREAM:-1.1.1.1:53}"
-state_dir="${FX_STATE_DIR:-.ferrix-state}"
-vite_port="${FX_VITE_PORT:-5173}"
+dns_listen="${FERRIXDNS_DNS_LISTEN:-127.0.0.1:5300}"
+web_listen="${FERRIXDNS_WEB_LISTEN:-127.0.0.1:8080}"
+upstream="${FERRIXDNS_UPSTREAM:-1.1.1.1:53}"
+state_dir="${FERRIXDNS_STATE_DIR:-.ferrix-state}"
+vite_port="${FERRIXDNS_VITE_PORT:-5173}"
 
 dev=false
 extra_args=()
@@ -49,7 +49,7 @@ pnpm --dir frontend build >/dev/null
 echo "==> Building the node"
 cargo build --package node-bin
 
-fx=(target/debug/fx serve
+ferrixdns=(target/debug/ferrixdns serve
     --listen "$dns_listen"
     --upstream "$upstream"
     --state-dir "$state_dir"
@@ -68,7 +68,7 @@ echo "    First run:  copy setup_token from the log below. Press Ctrl-C to stop.
 echo
 
 if [[ "$dev" != true ]]; then
-    exec "${fx[@]}"
+    exec "${ferrixdns[@]}"
 fi
 
 pids=()
@@ -80,11 +80,11 @@ stop() {
 trap stop EXIT
 trap 'exit 0' INT TERM
 
-"${fx[@]}" &
+"${ferrixdns[@]}" &
 pids+=($!)
 (
     cd frontend
-    export FX_WEB_LISTEN="$web_listen"
+    export FERRIXDNS_WEB_LISTEN="$web_listen"
     exec ./node_modules/.bin/vite --port "$vite_port" --strictPort --clearScreen false
 ) &
 pids+=($!)

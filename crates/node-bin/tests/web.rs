@@ -5,8 +5,8 @@
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-fn fx() -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_fx"));
+fn ferrixdns() -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_ferrixdns"));
     command.env_remove("RUST_LOG");
     command
 }
@@ -21,7 +21,7 @@ const SERVE: [&str; 5] = [
 
 #[test]
 fn the_web_ui_needs_a_state_directory() {
-    let output = fx()
+    let output = ferrixdns()
         .args(SERVE)
         .args(["--web-listen", "127.0.0.1:0"])
         .output()
@@ -33,7 +33,7 @@ fn the_web_ui_needs_a_state_directory() {
 #[test]
 fn plain_http_on_a_network_address_needs_explicit_consent() {
     let directory = tempfile::tempdir().unwrap();
-    let output = fx()
+    let output = ferrixdns()
         .args(SERVE)
         .args(["--web-listen", "0.0.0.0:0", "--state-dir"])
         .arg(directory.path())
@@ -48,7 +48,7 @@ fn plain_http_on_a_network_address_needs_explicit_consent() {
 fn health_reports_a_silent_or_missing_node() {
     let silent = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
     let address = silent.local_addr().unwrap().to_string();
-    let output = fx()
+    let output = ferrixdns()
         .args(["health", "--address", &address])
         .output()
         .unwrap();
@@ -61,11 +61,14 @@ fn settings_can_come_from_the_environment_and_health_checks_a_real_node() {
     use std::io::BufRead;
 
     let directory = tempfile::tempdir().unwrap();
-    let mut child = fx()
+    let mut child = ferrixdns()
         .arg("serve")
-        .env("FX_LISTEN", "127.0.0.1:0")
-        .env("FX_UPSTREAM", "127.0.0.1:9,tls://dns.example@127.0.0.1:9")
-        .env("FX_STATE_DIR", directory.path())
+        .env("FERRIXDNS_LISTEN", "127.0.0.1:0")
+        .env(
+            "FERRIXDNS_UPSTREAM",
+            "127.0.0.1:9,tls://dns.example@127.0.0.1:9",
+        )
+        .env("FERRIXDNS_STATE_DIR", directory.path())
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
@@ -73,12 +76,15 @@ fn settings_can_come_from_the_environment_and_health_checks_a_real_node() {
     let mut line = String::new();
     let address = loop {
         line.clear();
-        assert!(stderr.read_line(&mut line).unwrap() > 0, "fx exited early");
+        assert!(
+            stderr.read_line(&mut line).unwrap() > 0,
+            "ferrixdns exited early"
+        );
         if let Some((_, rest)) = line.split_once("address=") {
             break rest.split_whitespace().next().unwrap().to_owned();
         }
     };
-    let output = fx()
+    let output = ferrixdns()
         .args(["health", "--address", &address])
         .output()
         .unwrap();
@@ -96,7 +102,7 @@ fn settings_can_come_from_the_environment_and_health_checks_a_real_node() {
 fn start_tls(state: &std::path::Path) -> (std::process::Child, String, String, Option<String>) {
     use std::io::BufRead;
 
-    let mut child = fx()
+    let mut child = ferrixdns()
         .args(SERVE)
         .args([
             "--web-listen",
@@ -114,7 +120,10 @@ fn start_tls(state: &std::path::Path) -> (std::process::Child, String, String, O
     let mut line = String::new();
     while url.is_none() || token.is_none() {
         line.clear();
-        assert!(stderr.read_line(&mut line).unwrap() > 0, "fx exited early");
+        assert!(
+            stderr.read_line(&mut line).unwrap() > 0,
+            "ferrixdns exited early"
+        );
         let value = |key: &str| {
             line.split_once(key)
                 .map(|(_, rest)| rest.split_whitespace().next().unwrap().to_owned())
@@ -227,14 +236,14 @@ fn the_web_ui_serves_tls_with_a_self_signed_certificate_and_secure_cookies() {
 
 #[test]
 fn openapi_prints_the_contract() {
-    let output = fx().arg("openapi").output().unwrap();
+    let output = ferrixdns().arg("openapi").output().unwrap();
     assert!(output.status.success());
     let text = String::from_utf8_lossy(&output.stdout);
     assert!(text.contains("\"/api/v1/rules\""));
 }
 
 fn reset(state: &std::path::Path, username: &str, password: &str) -> std::process::Output {
-    let mut child = fx()
+    let mut child = ferrixdns()
         .args([
             "admin",
             "reset-password",
@@ -271,12 +280,12 @@ mod backup {
     use super::*;
 
     fn run(args: &[&str], state: &Path, extra: &[(&str, &str)]) -> Output {
-        let mut command = fx();
+        let mut command = ferrixdns();
         command.args(args).arg("--state-dir").arg(state);
         for (key, value) in extra {
             command.env(key, value);
         }
-        command.env_remove("FX_BACKUP_PASSPHRASE");
+        command.env_remove("FERRIXDNS_BACKUP_PASSPHRASE");
         for (key, value) in extra {
             command.env(key, value);
         }
@@ -292,7 +301,7 @@ mod backup {
         )
         .unwrap();
         // A brief start with --policy stores it as a revision.
-        let mut child = fx()
+        let mut child = ferrixdns()
             .args([
                 "serve",
                 "--listen",
@@ -377,16 +386,16 @@ mod backup {
 
         let missing = run(&args, &state, &[]);
         assert!(!missing.status.success());
-        assert!(String::from_utf8_lossy(&missing.stderr).contains("FX_BACKUP_PASSPHRASE"));
+        assert!(String::from_utf8_lossy(&missing.stderr).contains("FERRIXDNS_BACKUP_PASSPHRASE"));
 
-        let short = run(&args, &state, &[("FX_BACKUP_PASSPHRASE", "short")]);
+        let short = run(&args, &state, &[("FERRIXDNS_BACKUP_PASSPHRASE", "short")]);
         assert!(!short.status.success());
         assert!(String::from_utf8_lossy(&short.stderr).contains("at least 10"));
 
         let good = run(
             &args,
             &state,
-            &[("FX_BACKUP_PASSPHRASE", "a long passphrase")],
+            &[("FERRIXDNS_BACKUP_PASSPHRASE", "a long passphrase")],
         );
         assert!(
             good.status.success(),
@@ -398,7 +407,7 @@ mod backup {
         let wrong = run(
             &["backup", "restore", "--input", archive.to_str().unwrap()],
             &target,
-            &[("FX_BACKUP_PASSPHRASE", "the wrong passphrase")],
+            &[("FERRIXDNS_BACKUP_PASSPHRASE", "the wrong passphrase")],
         );
         assert!(!wrong.status.success());
         assert!(String::from_utf8_lossy(&wrong.stderr).contains("passphrase"));
@@ -410,7 +419,7 @@ mod backup {
         let right = run(
             &["backup", "restore", "--input", archive.to_str().unwrap()],
             &target,
-            &[("FX_BACKUP_PASSPHRASE", "a long passphrase")],
+            &[("FERRIXDNS_BACKUP_PASSPHRASE", "a long passphrase")],
         );
         assert!(
             right.status.success(),

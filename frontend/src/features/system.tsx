@@ -147,7 +147,7 @@ function BackupCard({ readOnly }: { readOnly: boolean }) {
           </p>
           {preview.has_credentials && (
             <p className="mt-1 text-text-secondary">
-              It also holds encrypted accounts, which only <code>fx backup restore</code> can restore.
+              It also holds encrypted accounts, which only <code>ferrixdns backup restore</code> can restore.
             </p>
           )}
           <div className="mt-3 flex gap-2">

@@ -653,7 +653,7 @@ dependencies = [
 
 [[package]]
 name = "dns-backup"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "argon2",
  "chacha20poly1305",
@@ -669,7 +669,7 @@ dependencies = [
 
 [[package]]
 name = "dns-cache"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "hickory-proto",
  "moka",
@@ -677,7 +677,7 @@ dependencies = [
 
 [[package]]
 name = "dns-lists"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "dns-policy",
  "reqwest",
@@ -689,7 +689,7 @@ dependencies = [
 
 [[package]]
 name = "dns-policy"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "fst",
  "humantime",
@@ -703,7 +703,7 @@ dependencies = [
 
 [[package]]
 name = "dns-runtime"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -723,7 +723,7 @@ dependencies = [
 
 [[package]]
 name = "dns-storage"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "sha2 0.11.1",
  "sqlx",
@@ -735,7 +735,7 @@ dependencies = [
 
 [[package]]
 name = "dns-telemetry"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "dns-policy",
  "humantime",
@@ -749,7 +749,7 @@ dependencies = [
 
 [[package]]
 name = "dns-upstreams"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "dns-cache",
  "futures-util",
@@ -1424,7 +1424,7 @@ dependencies = [
 
 [[package]]
 name = "integration"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "arc-swap",
  "dns-cache",
@@ -1681,7 +1681,7 @@ dependencies = [
 
 [[package]]
 name = "node-api"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "argon2",
  "axum",
@@ -1715,7 +1715,7 @@ dependencies = [
 
 [[package]]
 name = "node-bin"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1885,7 +1885,7 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
 name = "performance"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "clap",
  "rand 0.9.5",

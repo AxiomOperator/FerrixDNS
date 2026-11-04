@@ -7,16 +7,21 @@ version: ${VERSION}
 section: net
 priority: optional
 maintainer: FerrixDNS contributors
+license: MIT OR Apache-2.0
 description: |
   Self-hostable DNS filtering and management, with a web dashboard.
 homepage: https://github.com/AxiomOperator/FerrixDNS
 depends:
   - ca-certificates
 contents:
-  - src: target/release/fx
-    dst: /usr/bin/fx
+  - src: target/release/ferrixdns
+    dst: /usr/bin/ferrixdns
     file_info:
       mode: 0755
+  - src: LICENSE-MIT
+    dst: /usr/share/doc/ferrixdns/LICENSE-MIT
+  - src: LICENSE-APACHE
+    dst: /usr/share/doc/ferrixdns/LICENSE-APACHE
   - src: packaging/systemd/ferrixdns.service
     dst: /usr/lib/systemd/system/ferrixdns.service
     file_info:

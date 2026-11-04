@@ -1,4 +1,4 @@
-//! End-to-end policy behavior of the `fx` binary: restarts, reloads, expiry and validation.
+//! End-to-end policy behavior of the `ferrixdns` binary: restarts, reloads, expiry and validation.
 //!
 //! The upstream is unreachable, so an allowed query gets SERVFAIL and a blocked one gets NXDOMAIN
 //! without touching the network.
@@ -21,7 +21,7 @@ fn deny(domain: &str) -> String {
     )
 }
 
-/// A running `fx serve` that's killed when dropped.
+/// A running `ferrixdns serve` that's killed when dropped.
 struct Node {
     child: Child,
     address: SocketAddr,
@@ -35,14 +35,14 @@ impl Drop for Node {
     }
 }
 
-fn fx() -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_fx"));
+fn ferrixdns() -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_ferrixdns"));
     command.env_remove("RUST_LOG");
     command
 }
 
 fn start(policy: Option<&Path>, state: &Path) -> Node {
-    let mut command = fx();
+    let mut command = ferrixdns();
     command
         .args([
             "serve",
@@ -64,7 +64,10 @@ fn start(policy: Option<&Path>, state: &Path) -> Node {
     let mut line = String::new();
     let address = loop {
         line.clear();
-        assert!(stderr.read_line(&mut line).unwrap() > 0, "fx exited early");
+        assert!(
+            stderr.read_line(&mut line).unwrap() > 0,
+            "ferrixdns exited early"
+        );
         if let Some((_, rest)) = line.split_once("address=") {
             break rest.split_whitespace().next().unwrap().parse().unwrap();
         }
@@ -172,7 +175,7 @@ fn a_restart_with_a_broken_file_keeps_the_last_good_policy() {
 fn refuses_to_start_with_a_broken_file_and_no_stored_policy() {
     let (_directory, policy, state) = setup();
     fs::write(&policy, "not valid").unwrap();
-    let output = fx()
+    let output = ferrixdns()
         .args([
             "serve",
             "--listen",
@@ -230,7 +233,7 @@ fn validate_accepts_good_files_and_rejects_bad_ones() {
     let (_directory, policy, _state) = setup();
 
     fs::write(&policy, deny("a.example")).unwrap();
-    let output = fx()
+    let output = ferrixdns()
         .args(["policy", "validate"])
         .arg(&policy)
         .output()
@@ -239,7 +242,7 @@ fn validate_accepts_good_files_and_rejects_bad_ones() {
     assert!(String::from_utf8_lossy(&output.stdout).contains("is valid: 1 rules"));
 
     fs::write(&policy, "schema_version = 99").unwrap();
-    let output = fx()
+    let output = ferrixdns()
         .args(["policy", "validate"])
         .arg(&policy)
         .output()
@@ -251,7 +254,7 @@ fn validate_accepts_good_files_and_rejects_bad_ones() {
 #[test]
 fn the_shipped_example_policy_is_valid() {
     let example = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/policy.toml");
-    let output = fx()
+    let output = ferrixdns()
         .args(["policy", "validate"])
         .arg(&example)
         .output()

@@ -19,7 +19,7 @@ use crate::AppState;
 use crate::error::ApiError;
 use crate::util::now_ms;
 
-pub const SESSION_COOKIE: &str = "fx_session";
+pub const SESSION_COOKIE: &str = "ferrixdns_session";
 pub const CSRF_HEADER: &str = "x-csrf-token";
 pub const SESSION_LIFETIME: Duration = Duration::from_secs(12 * 60 * 60);
 pub const MIN_PASSWORD_LENGTH: usize = 10;

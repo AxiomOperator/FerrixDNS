@@ -897,7 +897,7 @@ export interface components {
                 client_count: number;
                 created_at: string;
                 dry_run: boolean;
-                /** @description True if the backup holds accounts, which only `fx backup restore` can restore. */
+                /** @description True if the backup holds accounts, which only `ferrixdns backup restore` can restore. */
                 has_credentials: boolean;
                 list_count: number;
                 local_record_count: number;
@@ -1280,7 +1280,7 @@ export interface components {
             client_count: number;
             created_at: string;
             dry_run: boolean;
-            /** @description True if the backup holds accounts, which only `fx backup restore` can restore. */
+            /** @description True if the backup holds accounts, which only `ferrixdns backup restore` can restore. */
             has_credentials: boolean;
             list_count: number;
             local_record_count: number;

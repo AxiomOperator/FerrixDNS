@@ -1,4 +1,4 @@
-//! `fx`: the FerrixDNS node.
+//! `ferrixdns`: the FerrixDNS node.
 
 mod tls;
 
@@ -25,7 +25,7 @@ use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
-#[command(name = "fx", version, about = "FerrixDNS node")]
+#[command(name = "ferrixdns", version, about = "FerrixDNS node")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -49,7 +49,7 @@ enum Command {
         /// The node's DNS address
         #[arg(
             long = "address",
-            env = "FX_HEALTH_ADDRESS",
+            env = "FERRIXDNS_HEALTH_ADDRESS",
             default_value = "127.0.0.1:53"
         )]
         address: SocketAddr,
@@ -62,17 +62,17 @@ enum Command {
 enum BackupCommand {
     /// Write a backup to a file. This is safe while the node runs
     Create {
-        #[arg(long, env = "FX_STATE_DIR")]
+        #[arg(long, env = "FERRIXDNS_STATE_DIR")]
         state_dir: PathBuf,
         #[arg(long)]
         output: PathBuf,
-        /// Include accounts, encrypted with the passphrase in FX_BACKUP_PASSPHRASE
+        /// Include accounts, encrypted with the passphrase in FERRIXDNS_BACKUP_PASSPHRASE
         #[arg(long)]
         include_credentials: bool,
     },
     /// Check a backup and restore it. Stop the node first
     Restore {
-        #[arg(long, env = "FX_STATE_DIR")]
+        #[arg(long, env = "FERRIXDNS_STATE_DIR")]
         state_dir: PathBuf,
         #[arg(long)]
         input: PathBuf,
@@ -107,53 +107,58 @@ enum PolicyCommand {
 #[derive(Args)]
 struct ServeArgs {
     /// Address to listen on over UDP and TCP (repeatable)
-    #[arg(long, env = "FX_LISTEN", value_delimiter = ',', required = true)]
+    #[arg(long, env = "FERRIXDNS_LISTEN", value_delimiter = ',', required = true)]
     listen: Vec<SocketAddr>,
 
     /// Upstream server, tried in the order given (repeatable). Use 1.1.1.1 for plain DNS,
     /// tls://cloudflare-dns.com@1.1.1.1 for DNS over TLS, or
     /// https://cloudflare-dns.com/dns-query@1.1.1.1 for DNS over HTTPS
-    #[arg(long, env = "FX_UPSTREAM", value_delimiter = ',', required = true)]
+    #[arg(
+        long,
+        env = "FERRIXDNS_UPSTREAM",
+        value_delimiter = ',',
+        required = true
+    )]
     upstream: Vec<UpstreamServer>,
 
     /// Validate answers with DNSSEC on this node. Upstreams must return signatures
-    #[arg(long, env = "FX_DNSSEC_VALIDATE")]
+    #[arg(long, env = "FERRIXDNS_DNSSEC_VALIDATE")]
     dnssec_validate: bool,
 
     /// Source network allowed to query (repeatable). Replaces the default of loopback and
     /// private networks
-    #[arg(long, env = "FX_ALLOW", value_delimiter = ',')]
+    #[arg(long, env = "FERRIXDNS_ALLOW", value_delimiter = ',')]
     allow: Vec<IpNet>,
 
     /// Policy file to apply. Send SIGHUP to reload it without restarting
-    #[arg(long, env = "FX_POLICY")]
+    #[arg(long, env = "FERRIXDNS_POLICY")]
     policy: Option<PathBuf>,
 
     /// Directory for durable state, which restores the last good policy after a restart
-    #[arg(long, env = "FX_STATE_DIR")]
+    #[arg(long, env = "FERRIXDNS_STATE_DIR")]
     state_dir: Option<PathBuf>,
 
     /// Address for the web UI and API. Needs --state-dir
-    #[arg(long, env = "FX_WEB_LISTEN", requires = "state_dir")]
+    #[arg(long, env = "FERRIXDNS_WEB_LISTEN", requires = "state_dir")]
     web_listen: Option<SocketAddr>,
 
     /// Extra host name the web UI may be reached at (repeatable), such as dns.home.arpa
-    #[arg(long, env = "FX_WEB_HOST", value_delimiter = ',')]
+    #[arg(long, env = "FERRIXDNS_WEB_HOST", value_delimiter = ',')]
     web_host: Vec<String>,
 
     /// Certificate chain for the web UI, as PEM
-    #[arg(long, env = "FX_WEB_TLS_CERT", requires = "web_tls_key")]
+    #[arg(long, env = "FERRIXDNS_WEB_TLS_CERT", requires = "web_tls_key")]
     web_tls_cert: Option<PathBuf>,
 
     /// Private key for the web UI, as PEM
-    #[arg(long, env = "FX_WEB_TLS_KEY", requires = "web_tls_cert")]
+    #[arg(long, env = "FERRIXDNS_WEB_TLS_KEY", requires = "web_tls_cert")]
     web_tls_key: Option<PathBuf>,
 
     /// Serve the web UI over TLS with a self-signed certificate, kept in the state directory.
     /// Browsers will warn about it, so check its fingerprint against the node's log
     #[arg(
         long,
-        env = "FX_WEB_TLS_SELF_SIGNED",
+        env = "FERRIXDNS_WEB_TLS_SELF_SIGNED",
         conflicts_with = "web_tls_cert",
         conflicts_with = "web_insecure_remote"
     )]
@@ -161,35 +166,39 @@ struct ServeArgs {
 
     /// Allow the web UI on a non-loopback address over plain HTTP. Passwords and query logs can
     /// then be read by anyone on the network path
-    #[arg(long, env = "FX_WEB_INSECURE_REMOTE")]
+    #[arg(long, env = "FERRIXDNS_WEB_INSECURE_REMOTE")]
     web_insecure_remote: bool,
 
     /// Let list downloads reach loopback and private addresses
-    #[arg(long, env = "FX_ALLOW_PRIVATE_LIST_URLS")]
+    #[arg(long, env = "FERRIXDNS_ALLOW_PRIVATE_LIST_URLS")]
     allow_private_list_urls: bool,
 
     /// Memory for cached answers, in MiB. 0 turns the cache off
-    #[arg(long, env = "FX_CACHE_MIB", default_value_t = 64)]
+    #[arg(long, env = "FERRIXDNS_CACHE_MIB", default_value_t = 64)]
     cache_mib: u64,
 
     /// Longest time to keep any answer in the cache, in seconds
-    #[arg(long, env = "FX_CACHE_MAX_TTL", default_value_t = 86_400)]
+    #[arg(long, env = "FERRIXDNS_CACHE_MAX_TTL", default_value_t = 86_400)]
     cache_max_ttl: u64,
 
     /// Longest time to keep "not found" answers in the cache, in seconds
-    #[arg(long, env = "FX_CACHE_NEGATIVE_TTL", default_value_t = 300)]
+    #[arg(long, env = "FERRIXDNS_CACHE_NEGATIVE_TTL", default_value_t = 300)]
     cache_negative_ttl: u64,
 
     /// Maximum requests in flight upstream
-    #[arg(long, env = "FX_MAX_CONCURRENT_REQUESTS", default_value_t = 4096)]
+    #[arg(
+        long,
+        env = "FERRIXDNS_MAX_CONCURRENT_REQUESTS",
+        default_value_t = 4096
+    )]
     max_concurrent_requests: usize,
 
     /// Time allowed for one upstream server, in milliseconds
-    #[arg(long, env = "FX_ATTEMPT_TIMEOUT_MS", default_value_t = 800)]
+    #[arg(long, env = "FERRIXDNS_ATTEMPT_TIMEOUT_MS", default_value_t = 800)]
     attempt_timeout_ms: u64,
 
     /// Time allowed for a whole query, in milliseconds
-    #[arg(long, env = "FX_QUERY_TIMEOUT_MS", default_value_t = 2500)]
+    #[arg(long, env = "FERRIXDNS_QUERY_TIMEOUT_MS", default_value_t = 2500)]
     query_timeout_ms: u64,
 }
 
@@ -265,7 +274,7 @@ fn health(address: SocketAddr) -> Result<()> {
     Ok(())
 }
 
-const PASSPHRASE_VARIABLE: &str = "FX_BACKUP_PASSPHRASE";
+const PASSPHRASE_VARIABLE: &str = "FERRIXDNS_BACKUP_PASSPHRASE";
 
 async fn backup(command: BackupCommand) -> Result<()> {
     match command {

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Measures a release build of fx under load, and reports throughput, latency and memory.
+"""Measures a release build of ferrixdns under load, and reports throughput, latency and memory.
 
 The load generator, upstream and node all share this machine and compete for its CPU, so these are
 conservative numbers for this hardware, not a published benchmark (spec section 8.6).
@@ -23,7 +23,7 @@ import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-FX = ROOT / "target/release/fx"
+FX = ROOT / "target/release/ferrixdns"
 DNSLOAD = ROOT / "target/release/dnsload"
 PASSWORD = "load test password"
 
@@ -69,7 +69,7 @@ class Node:
                 *extra,
             ],
             stderr=self.log,
-            env={**os.environ, "NO_COLOR": "1", "RUST_LOG": "warn,fx=info"},
+            env={**os.environ, "NO_COLOR": "1", "RUST_LOG": "warn,ferrixdns=info"},
         )
         started = time.monotonic()
         self.ready_seconds = None
@@ -81,7 +81,7 @@ class Node:
             except OSError:
                 time.sleep(0.05)
         if self.ready_seconds is None:
-            raise RuntimeError("fx didn't start")
+            raise RuntimeError("ferrixdns didn't start")
         self.cookie = None
         self.csrf = None
         self.sign_in()

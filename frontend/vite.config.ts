@@ -13,6 +13,6 @@ export default defineConfig({
   },
   server: {
     // `pnpm dev` needs a running node. scripts/start.sh --dev starts both.
-    proxy: { "/api": `http://${process.env.FX_WEB_LISTEN ?? "127.0.0.1:8080"}` },
+    proxy: { "/api": `http://${process.env.FERRIXDNS_WEB_LISTEN ?? "127.0.0.1:8080"}` },
   },
 });

@@ -332,7 +332,8 @@ fn a_backup_with_no_policy_or_a_broken_policy_is_rejected() {
 fn private_files_are_owner_only() {
     use std::os::unix::fs::PermissionsExt;
 
-    let directory = std::env::temp_dir().join(format!("fx-backup-test-{}", std::process::id()));
+    let directory =
+        std::env::temp_dir().join(format!("ferrixdns-backup-test-{}", std::process::id()));
     std::fs::create_dir_all(&directory).unwrap();
     let path = directory.join("backup.tar.gz");
     write_private_file(&path, b"content").unwrap();

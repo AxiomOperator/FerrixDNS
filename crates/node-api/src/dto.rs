@@ -654,7 +654,7 @@ pub struct RestoreResult {
     pub list_count: usize,
     pub client_count: usize,
     pub local_record_count: usize,
-    /// True if the backup holds accounts, which only `fx backup restore` can restore.
+    /// True if the backup holds accounts, which only `ferrixdns backup restore` can restore.
     pub has_credentials: bool,
 }
 

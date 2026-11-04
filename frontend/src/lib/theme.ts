@@ -1,6 +1,6 @@
 export type Theme = "system" | "light" | "dark";
 
-const STORAGE_KEY = "fx-theme";
+const STORAGE_KEY = "ferrixdns-theme";
 
 /** Storage can be unavailable, in which case the theme just isn't remembered. */
 export function storedTheme(): Theme {

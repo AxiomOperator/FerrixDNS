@@ -31,7 +31,7 @@ API and `config.db`:
 - Revisions store the **source document, not compiled indexes**, and are recompiled at boot. The
   compiled format is still open (spec section 13), and boot time on large lists needs measuring.
 - If the file is missing or invalid at boot, the newest stored revision that verifies and compiles
-  is used. If `--policy` was given and nothing usable exists, `fx` refuses to start. This is a
+  is used. If `--policy` was given and nothing usable exists, `ferrixdns` refuses to start. This is a
   provisional answer to the boot-behavior question in spec section 13.
 - A SIGHUP reload that fails leaves the active policy unchanged, and rule edits reuse the compiled
   list layer when lists are unchanged.

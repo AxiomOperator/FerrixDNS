@@ -1,4 +1,4 @@
-/** Runs the real `fx` binary against a scripted upstream, for end-to-end tests. */
+/** Runs the real `ferrixdns` binary against a scripted upstream, for end-to-end tests. */
 
 import { type ChildProcess, spawn } from "node:child_process";
 import dgram from "node:dgram";
@@ -89,8 +89,8 @@ export async function startNode(): Promise<Node> {
   const listServer = await startListServer(lists);
   const upstreamPort = (upstream.address() as AddressInfo).port;
 
-  const fx: ChildProcess = spawn(
-    path.join(REPO_ROOT, "target/debug/fx"),
+  const ferrixdns: ChildProcess = spawn(
+    path.join(REPO_ROOT, "target/debug/ferrixdns"),
     [
       "serve",
       "--listen", "127.0.0.1:0",
@@ -107,9 +107,9 @@ export async function startNode(): Promise<Node> {
       let dnsPort: number | undefined;
       let webUrl: string | undefined;
       let setupToken: string | undefined;
-      fx.once("exit", (code) => reject(new Error(`fx exited early with code ${code}`)));
-      if (!fx.stderr) throw new Error("fx has no stderr");
-      createInterface({ input: fx.stderr }).on("line", (line) => {
+      ferrixdns.once("exit", (code) => reject(new Error(`ferrixdns exited early with code ${code}`)));
+      if (!ferrixdns.stderr) throw new Error("ferrixdns has no stderr");
+      createInterface({ input: ferrixdns.stderr }).on("line", (line) => {
         dnsPort ??= Number(/listening for DNS.* address=[\d.]+:(\d+)/.exec(line)?.[1]) || undefined;
         webUrl ??= /url=(http:\S+)/.exec(line)?.[1];
         setupToken ??= /setup_token=([0-9a-f]+)/.exec(line)?.[1];
@@ -118,7 +118,7 @@ export async function startNode(): Promise<Node> {
     },
   );
   const { dnsPort, webUrl, setupToken } = await startup;
-  fx.removeAllListeners("exit");
+  ferrixdns.removeAllListeners("exit");
 
   return {
     webUrl,
@@ -144,7 +144,7 @@ export async function startNode(): Promise<Node> {
       });
     },
     async stop() {
-      fx.kill("SIGTERM");
+      ferrixdns.kill("SIGTERM");
       upstream.close();
       listServer.close();
       await new Promise((resolve) => setTimeout(resolve, 200));

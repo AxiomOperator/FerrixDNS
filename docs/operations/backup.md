@@ -11,10 +11,10 @@ and shows what it contains, and accounts on the node are left alone.
 ## From the command line
 
 ```sh
-fx backup create --state-dir /var/lib/ferrixdns --output backup.tar.gz
-fx backup restore --state-dir /var/lib/ferrixdns --input backup.tar.gz --dry-run
+ferrixdns backup create --state-dir /var/lib/ferrixdns --output backup.tar.gz
+ferrixdns backup restore --state-dir /var/lib/ferrixdns --input backup.tar.gz --dry-run
 sudo systemctl stop ferrixdns
-fx backup restore --state-dir /var/lib/ferrixdns --input backup.tar.gz
+ferrixdns backup restore --state-dir /var/lib/ferrixdns --input backup.tar.gz
 sudo systemctl start ferrixdns
 ```
 
@@ -27,9 +27,9 @@ commands as root, and after restoring as root, restart the service so systemd fi
 Accounts are only included when encrypted, using a passphrase of at least 10 characters:
 
 ```sh
-FX_BACKUP_PASSPHRASE='a long passphrase' fx backup create --include-credentials \
+FERRIXDNS_BACKUP_PASSPHRASE='a long passphrase' ferrixdns backup create --include-credentials \
     --state-dir /var/lib/ferrixdns --output backup.tar.gz
-FX_BACKUP_PASSPHRASE='a long passphrase' fx backup restore \
+FERRIXDNS_BACKUP_PASSPHRASE='a long passphrase' ferrixdns backup restore \
     --state-dir /var/lib/ferrixdns --input backup.tar.gz
 ```
 
@@ -55,7 +55,7 @@ Spec section 7.4 asks for a restore test each quarter. `--dry-run` confirms a fi
 test restores to a scratch directory, then starts a node on it:
 
 ```sh
-fx backup restore --state-dir /tmp/restore-test --input backup.tar.gz
-fx serve --listen 127.0.0.1:5399 --upstream 1.1.1.1 --state-dir /tmp/restore-test
+ferrixdns backup restore --state-dir /tmp/restore-test --input backup.tar.gz
+ferrixdns serve --listen 127.0.0.1:5399 --upstream 1.1.1.1 --state-dir /tmp/restore-test
 dig @127.0.0.1 -p 5399 a-domain-you-block.example
 ```

@@ -1,4 +1,4 @@
-# An example FerrixDNS policy. Check a file with: fx policy validate examples/policy.toml
+# An example FerrixDNS policy. Check a file with: ferrixdns policy validate examples/policy.toml
 schema_version = 1
 
 # This node's site, which selects rules scoped to { kind = "site" }. Optional.

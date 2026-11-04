@@ -4,6 +4,7 @@ description = "Durable node storage: policy revisions, list artifacts and the co
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
 publish.workspace = true
 
 [dependencies]

@@ -7,7 +7,7 @@ Wants=network-online.target
 [Service]
 Type=exec
 EnvironmentFile=/etc/ferrixdns/ferrixdns.env
-ExecStart=/usr/bin/fx serve
+ExecStart=/usr/bin/ferrixdns serve
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=always
 RestartSec=2

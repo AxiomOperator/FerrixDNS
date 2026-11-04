@@ -1,4 +1,4 @@
-//! End-to-end checks of the `fx` binary.
+//! End-to-end checks of the `ferrixdns` binary.
 
 use std::io::{BufRead, BufReader, Read};
 use std::net::{SocketAddr, UdpSocket};
@@ -11,7 +11,7 @@ const QUERY: &[u8] = b"\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\
 
 #[test]
 fn serves_dns_without_logging_query_names_by_default() {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_fx"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ferrixdns"))
         .args([
             "serve",
             "--listen",
@@ -31,7 +31,7 @@ fn serves_dns_without_logging_query_names_by_default() {
         startup.clear();
         assert!(
             stderr.read_line(&mut startup).unwrap() > 0,
-            "fx exited early"
+            "ferrixdns exited early"
         );
         if let Some((_, rest)) = startup.split_once("address=") {
             break rest.split_whitespace().next().unwrap().parse().unwrap();
@@ -71,7 +71,7 @@ fn serves_dns_without_logging_query_names_by_default() {
 fn bind_failures_name_the_protocol_and_address() {
     let taken = UdpSocket::bind("127.0.0.1:0").unwrap();
     let address = taken.local_addr().unwrap().to_string();
-    let output = Command::new(env!("CARGO_BIN_EXE_fx"))
+    let output = Command::new(env!("CARGO_BIN_EXE_ferrixdns"))
         .args(["serve", "--listen", &address, "--upstream", "127.0.0.1:9"])
         .output()
         .unwrap();
@@ -85,7 +85,7 @@ fn bind_failures_name_the_protocol_and_address() {
 
 #[test]
 fn requires_listen_and_upstream_addresses() {
-    let output = Command::new(env!("CARGO_BIN_EXE_fx"))
+    let output = Command::new(env!("CARGO_BIN_EXE_ferrixdns"))
         .args(["serve", "--listen", "127.0.0.1:0"])
         .output()
         .unwrap();

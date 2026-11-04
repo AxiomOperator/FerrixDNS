@@ -491,7 +491,7 @@ pub fn openapi_json() -> Result<String, serde_json::Error> {
     ApiDoc::openapi().to_pretty_json()
 }
 
-/// Sets an administrator's password and ends their sessions, for `fx` account recovery.
+/// Sets an administrator's password and ends their sessions, for `ferrixdns` account recovery.
 pub async fn reset_password(
     db: &ConfigDb,
     username: &str,

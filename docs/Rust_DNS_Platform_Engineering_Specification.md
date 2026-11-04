@@ -3,7 +3,8 @@
 **Status:** Proposed v1 engineering baseline; blocking design decisions resolved, remaining items tracked in §13  
 **Date:** 2026-11-03  
 **Product name:** FerrixDNS
-**CLI Command:** fx
+**CLI Command:** ferrixdns
+**License:** MIT OR Apache-2.0
 **Deployment model:** Standalone edge nodes plus optional centralized management  
 **Core stack:** Rust / Tokio / Axum / Hickory DNS / SQLx / SQLite / PostgreSQL; Vite / React / TypeScript / shadcn/ui / TanStack Router / TanStack Query  
 **Scope:** Greenfield implementation inspired by Pi-hole's product capabilities, not a code translation.
@@ -1045,10 +1046,10 @@ These items are not yet resolved in this specification.
 - Add FRs for DNSSEC, encrypted upstreams, IPv6, conditional forwarders and import tooling, and map each to a phase.
 - Map v0.1, v1.0 and v1.5 to phases. FR-006 is P0 and packaging is in v0.1 scope, but both arrive in Phase 4.
 - Add the promised acceptance-ID mapping (§2) and make weak acceptance criteria testable.
-- Specify the `fx` CLI, and check the name for conflicts with existing tools.
+- Specify the rest of the `ferrixdns` CLI, including diagnostics (FR-012).
 - Add missing node API endpoints: API token management, query export, a Prometheus endpoint and temporary blocking pause. Web restores don't include accounts, by design.
 - Stream backups rather than building them in memory, and consider including query history as an explicit choice (§7.4).
-- `fx backup create` opens the policy store the same way a node does, which clears leftover temporary files. A change saved by a running node at that exact moment can fail and need retrying.
+- `ferrixdns backup create` opens the policy store the same way a node does, which clears leftover temporary files. A change saved by a running node at that exact moment can fail and need retrying.
 - Add missing controller API endpoints: deployment cancel and node revoke.
 - Complete the node schema: API tokens and editable upstreams. Upstreams are currently set with `--upstream` and are read-only in the UI.
 - Align remaining names, such as `deny`/`blocked` and `client_ip`/`address`.
@@ -1060,7 +1061,7 @@ These items are not yet resolved in this specification.
 - Reconcile §4.3 with the implementation. `migrations/` is now the source of truth: policy lives only in revision files, so `config.db` holds accounts, sessions, list fetch state and the audit log, with no table projections (ADR-012). Telemetry timestamps are integer milliseconds.
 - Revisit the query log's single-row button in the virtualized table, which passes automated checks but isn't a true table for screen readers.
 - Re-estimate the plan. Phase 7 contains a 30-day soak in 3-5 weeks, Phase 4 looks undersized, and Phases 2 and 6 gained scope from the decisions above.
-- Choose a product license and define downgrade behavior after migrations.
+- Define downgrade behavior after migrations.
 - Add LAN-level redundancy guidance behind the 99.95% target.
 
 **Smaller fixes**

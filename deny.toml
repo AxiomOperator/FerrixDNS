@@ -8,7 +8,7 @@ allow-wildcard-paths = true
 
 [licenses]
 version = 2
-# The product license is still an open item (spec section 13), so workspace crates are unpublished.
+# Workspace crates aren't published to a registry, so only their dependencies need checking here.
 private = { ignore = true }
 allow = [
     "Apache-2.0",

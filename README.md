@@ -44,7 +44,7 @@ reaching it from other devices over TLS.
 Lost your password? This sets a new one from standard input and ends all sessions:
 
 ```sh
-fx admin reset-password --state-dir .ferrix-state --username admin
+ferrixdns admin reset-password --state-dir .ferrix-state --username admin
 ```
 
 ## Managing policy
@@ -56,14 +56,14 @@ You can also manage policy in a file. The dashboard is then read-only for policy
 disagree. [`examples/policy.toml`](examples/policy.toml) shows the options.
 
 ```sh
-fx serve --listen 127.0.0.1:5300 --upstream 1.1.1.1:53 --policy my-policy.toml --state-dir .ferrix-state
-fx policy validate my-policy.toml    # check a file without applying it
-kill -HUP "$(pidof fx)"              # apply changes without restarting
+ferrixdns serve --listen 127.0.0.1:5300 --upstream 1.1.1.1:53 --policy my-policy.toml --state-dir .ferrix-state
+ferrixdns policy validate my-policy.toml    # check a file without applying it
+kill -HUP "$(pidof ferrixdns)"              # apply changes without restarting
 ```
 
 - A bad file never replaces the active policy. A failed reload is logged and changes nothing.
 - If the file is later missing or invalid, the node restarts on the newest stored policy that works.
-- If `--policy` is set but invalid and nothing is stored, `fx` refuses to start instead of serving
+- If `--policy` is set but invalid and nothing is stored, `ferrixdns` refuses to start instead of serving
   unfiltered DNS.
 
 ## Query data and privacy
@@ -89,7 +89,7 @@ pnpm --dir frontend typecheck
 pnpm --dir frontend build && cargo build -p node-bin && pnpm --dir frontend test:e2e
 ```
 
-The browser tests drive the real `fx` binary with real DNS queries, and run accessibility checks on
+The browser tests drive the real `ferrixdns` binary with real DNS queries, and run accessibility checks on
 each page. They need Playwright's browser: `pnpm --dir frontend exec playwright install chromium`.
 
 To measure throughput and latency, or the policy engine with a large list:
@@ -98,3 +98,13 @@ To measure throughput and latency, or the policy engine with a large list:
 scripts/load_test.py
 cargo run --release -p dns-policy --example bench_policy -- 1000000
 ```
+
+## License
+
+FerrixDNS is available under either of these licenses, at your choice:
+
+- [Apache License, Version 2.0](LICENSE-APACHE)
+- [MIT License](LICENSE-MIT)
+
+Unless you say otherwise, any contribution you submit for inclusion is dual licensed the same way,
+with no additional terms.

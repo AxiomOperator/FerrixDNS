@@ -40,11 +40,11 @@ By default it stays on loopback. To reach it from elsewhere, choose one:
 
 | Method | Settings | Notes |
 |---|---|---|
-| Your own certificate | `FX_WEB_TLS_CERT`, `FX_WEB_TLS_KEY` | Best. Also turns on HSTS. Restart to load a renewed certificate. |
-| Self-signed | `FX_WEB_TLS_SELF_SIGNED=true` | Browsers warn. Check the certificate against the `sha256` in the node's log. |
-| A TLS proxy | Keep loopback, and set `FX_WEB_HOST` | The proxy must send the original host name. |
+| Your own certificate | `FERRIXDNS_WEB_TLS_CERT`, `FERRIXDNS_WEB_TLS_KEY` | Best. Also turns on HSTS. Restart to load a renewed certificate. |
+| Self-signed | `FERRIXDNS_WEB_TLS_SELF_SIGNED=true` | Browsers warn. Check the certificate against the `sha256` in the node's log. |
+| A TLS proxy | Keep loopback, and set `FERRIXDNS_WEB_HOST` | The proxy must send the original host name. |
 
-Also set `FX_WEB_LISTEN` to a network address, and `FX_WEB_HOST` to every name or address people will
+Also set `FERRIXDNS_WEB_LISTEN` to a network address, and `FERRIXDNS_WEB_HOST` to every name or address people will
 use, such as `dns.home.arpa,192.168.1.10`. Other names are refused, which is what stops DNS rebinding
 attacks. Plain HTTP on a network address needs `--web-insecure-remote`, which exposes passwords and
 query logs to anyone on the network path.
@@ -54,8 +54,8 @@ query logs to anyone on the network path.
 Give the certificate's name and an IP address, because this node can't look up its own upstream:
 
 ```sh
-FX_UPSTREAM=tls://cloudflare-dns.com@1.1.1.1,tls://dns.quad9.net@9.9.9.9
-FX_UPSTREAM=https://cloudflare-dns.com/dns-query@1.1.1.1
+FERRIXDNS_UPSTREAM=tls://cloudflare-dns.com@1.1.1.1,tls://dns.quad9.net@9.9.9.9
+FERRIXDNS_UPSTREAM=https://cloudflare-dns.com/dns-query@1.1.1.1
 ```
 
 A certificate failure counts as a failed upstream and never falls back to plain DNS. Certificates are
@@ -63,7 +63,7 @@ checked against the Mozilla root list built into the binary.
 
 ## DNSSEC validation
 
-Set `FX_DNSSEC_VALIDATE=true` to validate answers on this node. It's off by default.
+Set `FERRIXDNS_DNSSEC_VALIDATE=true` to validate answers on this node. It's off by default.
 
 - Upstreams must return signatures. Most public resolvers do, but some home routers don't, and then
   signed domains fail.
@@ -74,7 +74,7 @@ Set `FX_DNSSEC_VALIDATE=true` to validate answers on this node. It's off by defa
 
 ## Monitoring
 
-`fx health --address 192.168.1.10:53` exits non-zero if the node isn't answering DNS. It queries a name
+`ferrixdns health --address 192.168.1.10:53` exits non-zero if the node isn't answering DNS. It queries a name
 the node answers itself, so upstream problems don't affect it.
 
 ## Upgrading
