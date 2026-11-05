@@ -17,6 +17,39 @@ export class ApiError extends Error {
 
 const BASE = "/api/v1";
 
+/** On a controller, these belong to the site being edited, and not to the controller itself. */
+const SITE_PATHS = [
+  "/rules",
+  "/lists",
+  "/jobs",
+  "/clients",
+  "/groups",
+  "/blocked-services",
+  "/dns/zones",
+  "/dns/records",
+  "/dns/forwarders",
+  "/settings",
+  "/config/revisions",
+  "/config/activate",
+];
+
+let currentSite: string | undefined;
+
+/** Sends policy requests to this site's policy. Only a controller has sites. */
+export function setApiSite(site: string | undefined) {
+  currentSite = site;
+}
+
+function isSitePath(path: string): boolean {
+  const plain = path.split("?")[0] ?? path;
+  return SITE_PATHS.some((prefix) => plain === prefix || plain.startsWith(`${prefix}/`));
+}
+
+/** The address of an API path, for links and streams that don't go through `request`. */
+export function apiUrl(path: string): string {
+  return currentSite && isSitePath(path) ? `${BASE}/sites/${currentSite}${path}` : `${BASE}${path}`;
+}
+
 let csrfToken: string | undefined;
 
 export function setCsrfToken(token: string | undefined) {
@@ -47,7 +80,7 @@ export async function request<T>(
 
   let response: Response;
   try {
-    response = await fetch(`${BASE}${path}`, {
+    response = await fetch(apiUrl(path), {
       method,
       headers,
       credentials: "same-origin",

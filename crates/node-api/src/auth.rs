@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use argon2::Argon2;
 use argon2::password_hash::phc::PasswordHash;
 use argon2::password_hash::{PasswordHasher, PasswordVerifier};
-use axum::extract::FromRequestParts;
+use axum::extract::{FromRef, FromRequestParts};
 use axum::http::header::{COOKIE, ORIGIN};
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, Method, StatusCode};
@@ -199,13 +199,16 @@ pub struct AuthSession {
     pub token_hash: String,
 }
 
-impl FromRequestParts<AppState> for AuthSession {
+impl<S> FromRequestParts<S> for AuthSession
+where
+    S: Send + Sync,
+    AppState: FromRef<S>,
+{
     type Rejection = ApiError;
 
-    async fn from_request_parts(
-        parts: &mut Parts,
-        state: &AppState,
-    ) -> Result<Self, Self::Rejection> {
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        let state = AppState::from_ref(state);
+        let state = &state;
         let token = session_token(&parts.headers).ok_or_else(ApiError::unauthenticated)?;
         let token_hash = sha256_hex(token.as_bytes());
         let session = state

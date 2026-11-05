@@ -7,6 +7,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, SystemTime};
 
@@ -46,6 +47,8 @@ pub enum PolicyLoadError {
 pub enum MutationError<E> {
     #[error("the policy is managed by a file, so it can't be changed here")]
     ReadOnly,
+    #[error("the policy is managed by a central controller, so it can't be changed here")]
+    Managed,
     #[error("policy changes need a state directory")]
     NoStateDirectory,
     #[error("{0}")]
@@ -79,6 +82,20 @@ pub struct PolicyManager {
     active: PolicyHandle,
     state: Mutex<State>,
     changed: Notify,
+    managed: AtomicBool,
+}
+
+/// Why a bundle from the controller wasn't made active. The active policy is unchanged.
+#[derive(Debug, Error)]
+pub enum BundleError {
+    #[error("this node has no state directory to keep a managed policy in")]
+    NoStateDirectory,
+    #[error("the policy file in the bundle isn't valid UTF-8")]
+    NotUtf8,
+    #[error(transparent)]
+    Invalid(#[from] PolicyError),
+    #[error("cannot store the policy: {0}")]
+    Storage(#[from] io::Error),
 }
 
 fn read_source(path: &Path) -> Result<Vec<u8>, PolicyLoadError> {
@@ -173,6 +190,7 @@ impl PolicyManager {
                 document,
             }),
             changed: Notify::new(),
+            managed: AtomicBool::new(false),
         }))
     }
 
@@ -208,9 +226,99 @@ impl PolicyManager {
         Ok(revision)
     }
 
-    /// Whether the policy comes from a file, which makes it read-only through the API.
+    /// Whether the policy comes from a file or a controller, which makes it read-only through the API.
     pub fn is_read_only(&self) -> bool {
-        self.lock().source.is_some()
+        self.is_managed() || self.lock().source.is_some()
+    }
+
+    /// Hands the policy over to a central controller. Only bundles change it from now on.
+    pub fn set_managed(&self) {
+        self.managed.store(true, Ordering::Relaxed);
+    }
+
+    /// Whether the policy comes from a central controller.
+    pub fn is_managed(&self) -> bool {
+        self.managed.load(Ordering::Relaxed)
+    }
+
+    /// The active revision.
+    pub fn revision(&self) -> String {
+        self.active.load().revision().to_owned()
+    }
+
+    /// Whether a downloaded list is already stored, so it needn't be fetched again.
+    pub fn has_artifact(&self, sha256: &str) -> bool {
+        self.lock()
+            .artifacts
+            .as_ref()
+            .is_some_and(|store| store.get(sha256).is_ok())
+    }
+
+    /// Validates a policy from the controller, stores it and its lists, and makes it active.
+    ///
+    /// On any error the active policy keeps serving. This compiles and does file I/O, so call it
+    /// off the async runtime.
+    pub fn apply_bundle(
+        &self,
+        policy: &[u8],
+        artifacts: &[Vec<u8>],
+    ) -> Result<String, BundleError> {
+        let mut state = self.lock();
+        let store = state.store.clone().ok_or(BundleError::NoStateDirectory)?;
+        let artifact_store = state
+            .artifacts
+            .clone()
+            .ok_or(BundleError::NoStateDirectory)?;
+        let text = std::str::from_utf8(policy).map_err(|_| BundleError::NotUtf8)?;
+        let document = PolicyDocument::parse(text)?;
+        log_warnings(&document);
+
+        // Lists first, because the stored revision refers to them.
+        for artifact in artifacts {
+            artifact_store.put(artifact)?;
+        }
+        let revision = sha256_hex(policy);
+        let current = self.active.load_full();
+        let previous = state.document.as_ref().map(|old| (old, &*current));
+        let compiled = compile_checked(
+            &revision,
+            &document,
+            SystemTime::now(),
+            previous,
+            &|sha256| load_artifact(Some(&artifact_store), sha256),
+        )?;
+
+        store.commit(policy)?;
+        self.active.store(Arc::new(compiled));
+        state.document = Some(document);
+        collect_unused_artifacts(&store, state.artifacts.as_ref());
+        drop(state);
+
+        self.changed.notify_one();
+        info!(revision = %short(&revision), "applied policy from the controller");
+        Ok(revision)
+    }
+
+    /// Goes back to a revision after a bundle turned out to break DNS, durably, so a restart
+    /// doesn't bring the bundle back. A node that had no policy goes back to having none.
+    pub fn revert_bundle(&self, revision: &str) -> Result<(), MutationError<RevisionNotFound>> {
+        match self.activate_revision(revision) {
+            Err(MutationError::Rejected(RevisionNotFound)) => {
+                let empty = PolicyDocument::default()
+                    .to_toml()
+                    .map_err(MutationError::Invalid)?;
+                self.apply_bundle(empty.as_bytes(), &[])
+                    .map(|_| ())
+                    .map_err(|error| match error {
+                        BundleError::Invalid(invalid) => MutationError::Invalid(invalid),
+                        BundleError::Storage(storage) => MutationError::Storage(storage),
+                        BundleError::NoStateDirectory | BundleError::NotUtf8 => {
+                            MutationError::NoStateDirectory
+                        }
+                    })
+            }
+            other => other,
+        }
     }
 
     /// The active policy document.
@@ -237,6 +345,9 @@ impl PolicyManager {
         &self,
         change: impl FnOnce(&mut PolicyDocument) -> Result<T, E>,
     ) -> Result<(T, String), MutationError<E>> {
+        if self.is_managed() {
+            return Err(MutationError::Managed);
+        }
         let mut state = self.lock();
         if state.source.is_some() {
             return Err(MutationError::ReadOnly);
@@ -306,6 +417,13 @@ impl PolicyManager {
 
     /// Makes a stored revision active again, as the newest revision.
     pub fn activate(&self, revision: &str) -> Result<(), MutationError<RevisionNotFound>> {
+        if self.is_managed() {
+            return Err(MutationError::Managed);
+        }
+        self.activate_revision(revision)
+    }
+
+    fn activate_revision(&self, revision: &str) -> Result<(), MutationError<RevisionNotFound>> {
         let mut state = self.lock();
         if state.source.is_some() {
             return Err(MutationError::ReadOnly);
@@ -382,6 +500,9 @@ impl PolicyManager {
         revisions: &[(String, Vec<u8>)],
         artifacts: &[(String, Vec<u8>)],
     ) -> Result<String, MutationError<RevisionNotFound>> {
+        if self.is_managed() {
+            return Err(MutationError::Managed);
+        }
         let mut state = self.lock();
         if state.source.is_some() {
             return Err(MutationError::ReadOnly);

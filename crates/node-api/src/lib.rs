@@ -1,11 +1,14 @@
 //! The node's authenticated HTTP API and embedded web UI.
 
 mod auth;
+mod diagnostics;
 mod dto;
 mod error;
+mod export;
 mod node_settings;
 mod refresh;
 mod routes;
+mod services;
 mod util;
 
 use std::future::Future;
@@ -32,16 +35,19 @@ use tokio::net::TcpListener;
 use tracing::{info, warn};
 use utoipa::OpenApi;
 
+pub use auth::AuthSession;
 pub use auth::{MIN_PASSWORD_LENGTH, hash_password};
+pub use dto::{Envelope, ServerRole};
+pub use error::{ApiError, ErrorEnvelope};
 pub use node_settings::{
     CONFIRM_WITHIN, NodeControl, NodeSettings, ParsedSettings, SavedSettings, SettingsStore,
     SettingsStoreError, Trial, WebTlsMode, data_dir, load_tls_files, move_data, saved_dns_address,
     saved_log_filter, tls_server_config,
 };
-pub use routes::{BackupBuildError, build_backup};
+pub use routes::{ApiResult, BackupBuildError, audit, build_backup};
+pub use util::{from_iso, now_ms, to_iso};
 
 use auth::{LoginGuard, PasswordWorker, random_token};
-use error::ApiError;
 use refresh::Jobs;
 
 const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self'; \
@@ -113,6 +119,7 @@ pub struct AppState {
     pub(crate) services: dns_runtime::Services,
     pub(crate) ntp: Option<NtpInfo>,
     pub(crate) node: Option<NodeControl>,
+    pub(crate) role: ServerRole,
 }
 
 /// What the API reports about the NTP server.
@@ -159,6 +166,8 @@ pub struct ApiConfig {
     pub ntp: Option<NtpInfo>,
     /// Present when this node's own settings can be changed from the dashboard.
     pub node: Option<NodeControl>,
+    /// Whether this serves a node's dashboard, or a central controller's.
+    pub role: ServerRole,
 }
 
 /// A started API: its state, plus the one-time setup token if setup is still needed.
@@ -200,6 +209,7 @@ impl Api {
             services: config.services,
             ntp: config.ntp,
             node: config.node,
+            role: config.role,
         };
         Ok(Self { state, setup_token })
     }
@@ -214,22 +224,25 @@ impl Api {
         router(self.state.clone())
     }
 
+    /// What handlers need, for a server built around this API.
+    pub fn state(&self) -> AppState {
+        self.state.clone()
+    }
+
+    /// Starts scheduled list refreshes, returning the task so it can be stopped.
+    pub fn spawn_list_refreshes(&self) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(refresh::run_schedule(self.state.clone()))
+    }
+
     /// Serves until `shutdown` completes, and starts scheduled list refreshes.
     pub async fn serve(
         self,
         listener: TcpListener,
         shutdown: impl Future<Output = ()> + Send + 'static,
     ) -> io::Result<()> {
-        tokio::spawn(refresh::run_schedule(self.state.clone()));
+        self.spawn_list_refreshes();
         tokio::spawn(save_devices(self.state.clone()));
-        let app = router(self.state);
-        info!(address = %listener.local_addr()?, "serving the web UI and API");
-        serve(
-            listener,
-            app.into_make_service_with_connect_info::<SocketAddr>(),
-        )
-        .with_graceful_shutdown(shutdown)
-        .await
+        serve_plain(router(self.state), listener, shutdown).await
     }
 
     /// Like [`Self::serve`], over TLS.
@@ -239,22 +252,63 @@ impl Api {
         tls: Arc<rustls::ServerConfig>,
         shutdown: impl Future<Output = ()> + Send + 'static,
     ) -> io::Result<()> {
-        tokio::spawn(refresh::run_schedule(self.state.clone()));
+        self.spawn_list_refreshes();
         tokio::spawn(save_devices(self.state.clone()));
-        let app = router(self.state);
-        info!(address = %listener.local_addr()?, "serving the web UI and API over TLS");
+        serve_tls(router(self.state), listener, tls, shutdown).await
+    }
+}
 
-        let handle = axum_server::Handle::new();
-        let stopping = handle.clone();
-        tokio::spawn(async move {
-            shutdown.await;
-            stopping.graceful_shutdown(Some(std::time::Duration::from_secs(5)));
-        });
-        let config = axum_server::tls_rustls::RustlsConfig::from_config(tls);
-        axum_server::from_tcp_rustls(listener.into_std()?, config)?
-            .handle(handle)
-            .serve(app.into_make_service_with_connect_info::<SocketAddr>())
-            .await
+/// Serves any router until `shutdown` completes.
+pub async fn serve_plain(
+    app: Router,
+    listener: TcpListener,
+    shutdown: impl Future<Output = ()> + Send + 'static,
+) -> io::Result<()> {
+    info!(address = %listener.local_addr()?, "serving the web UI and API");
+    serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown)
+    .await
+}
+
+/// Like [`serve_plain`], over TLS.
+pub async fn serve_tls(
+    app: Router,
+    listener: TcpListener,
+    tls: Arc<rustls::ServerConfig>,
+    shutdown: impl Future<Output = ()> + Send + 'static,
+) -> io::Result<()> {
+    info!(address = %listener.local_addr()?, "serving the web UI and API over TLS");
+    let handle = axum_server::Handle::new();
+    let stopping = handle.clone();
+    tokio::spawn(async move {
+        shutdown.await;
+        stopping.graceful_shutdown(Some(std::time::Duration::from_secs(5)));
+    });
+    let config = axum_server::tls_rustls::RustlsConfig::from_config(tls);
+    axum_server::from_tcp_rustls(listener.into_std()?, config)?
+        .handle(handle)
+        .serve(app.into_make_service_with_connect_info::<SocketAddr>())
+        .await
+}
+
+/// The node API's routes and dashboard files, for a server built around this API.
+pub fn dashboard_router(state: AppState) -> Router {
+    router(state)
+}
+
+/// Puts the dashboard's protections on routes outside this crate: unknown host names are refused,
+/// and responses carry the security headers.
+pub fn protect(app: Router, state: &AppState) -> Router {
+    let protected = app
+        .layer(middleware::from_fn_with_state(state.clone(), check_host))
+        .layer(middleware::from_fn(security_headers));
+    if state.hsts {
+        protected.layer(middleware::from_fn(strict_transport_security))
+    } else {
+        protected
     }
 }
 
@@ -288,6 +342,16 @@ fn api_routes() -> Router<AppState> {
         .route("/overview", get(overview))
         .route("/queries", get(queries))
         .route("/queries/stream", get(queries_stream))
+        .route("/queries/export", get(crate::export::export_queries))
+        .route("/diagnostics/lookup", post(crate::diagnostics::diagnose))
+        .route(
+            "/blocked-services",
+            get(crate::services::list_blocked_services),
+        )
+        .route(
+            "/blocked-services/{id}",
+            axum::routing::put(crate::services::set_blocked_service),
+        )
         .route("/rules", get(list_rules).post(create_rule))
         .route("/rules/test", post(test_rule))
         .route(
@@ -497,6 +561,10 @@ async fn static_asset(method: Method, uri: Uri) -> Response {
         routes::overview,
         routes::queries,
         routes::queries_stream,
+        export::export_queries,
+        diagnostics::diagnose,
+        services::list_blocked_services,
+        services::set_blocked_service,
         routes::list_rules,
         routes::create_rule,
         routes::get_rule,
@@ -553,9 +621,9 @@ async fn static_asset(method: Method, uri: Uri) -> Response {
 )]
 struct ApiDoc;
 
-/// The API contract as OpenAPI JSON, from which the UI's types are generated.
-pub fn openapi_json() -> Result<String, serde_json::Error> {
-    ApiDoc::openapi().to_pretty_json()
+/// The API contract, from which the UI's types are generated.
+pub fn openapi() -> utoipa::openapi::OpenApi {
+    ApiDoc::openapi()
 }
 
 /// Sets an administrator's password and ends their sessions, for `ferrixdns` account recovery.

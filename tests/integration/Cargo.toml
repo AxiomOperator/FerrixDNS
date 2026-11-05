@@ -9,14 +9,23 @@ publish.workspace = true
 
 [dependencies]
 arc-swap.workspace = true
+axum.workspace = true
+control-plane.workspace = true
 dns-cache.workspace = true
 dns-policy.workspace = true
 dns-runtime.workspace = true
+dns-telemetry.workspace = true
 dns-upstreams.workspace = true
 hickory-proto.workspace = true
+fleet-contract.workspace = true
 ipnet.workspace = true
+node-agent.workspace = true
+node-api.workspace = true
 rand.workspace = true
 rcgen.workspace = true
+reqwest = { workspace = true, features = ["json"] }
+serde_json.workspace = true
+tempfile.workspace = true
 ring = "0.17"
 rustls.workspace = true
 time = "0.3"

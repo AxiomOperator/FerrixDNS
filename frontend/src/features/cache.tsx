@@ -45,7 +45,7 @@ export function CachePage() {
       )}
       {data?.enabled && (
         <>
-          <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+          <div className="grid grid-cols-2 gap-4 lg:grid-cols-3">
             <Stat
               label="Hit rate"
               value={lookups > 0 ? `${((data.hits / lookups) * 100).toFixed(1)}%` : "No data"}
@@ -57,6 +57,16 @@ export function CachePage() {
               label="Memory"
               value={formatBytes(data.bytes)}
               detail={`Limit ${formatBytes(data.max_bytes)}`}
+            />
+            <Stat
+              label="Refreshed early"
+              value={formatCount(data.prefetches)}
+              detail="Popular answers renewed before they expired"
+            />
+            <Stat
+              label="Expired answers used"
+              value={formatCount(data.stale_served)}
+              detail="Given out because upstreams couldn't answer"
             />
           </div>
           <p className="mt-2 text-xs text-text-muted">Counts are since the node last started.</p>

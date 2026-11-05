@@ -1,4 +1,4 @@
-import { useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import { Filter } from "lucide-react";
 import { type FormEvent, type ReactNode, useState } from "react";
@@ -35,7 +35,7 @@ function useFinishSignIn() {
   return async (session: Awaited<ReturnType<typeof api.login>>) => {
     setCsrfToken(session.csrf_token);
     client.setQueryData(queries.session().queryKey, session);
-    client.setQueryData(queries.authStatus().queryKey, { setup_required: false });
+    client.setQueryData(queries.authStatus().queryKey, { setup_required: false, role: session.role });
     await navigate({ to: "/" });
   };
 }
@@ -60,7 +60,7 @@ export function LoginPage() {
   }
 
   return (
-    <AuthCard title="Sign in" description="Manage filtering and see what's happening on this node.">
+    <AuthCard title="Sign in" description="Manage filtering and see what's happening.">
       <form className="space-y-4" onSubmit={(event) => void submit(event)}>
         <Field label="Username" htmlFor="username">
           <Input
@@ -97,6 +97,7 @@ export function SetupPage() {
   const [error, setError] = useState<string>();
   const [pending, setPending] = useState(false);
   const finish = useFinishSignIn();
+  const status = useQuery(queries.authStatus());
 
   const tooShort = password.length > 0 && password.length < MIN_PASSWORD_LENGTH;
   const mismatch = confirmation.length > 0 && password !== confirmation;
@@ -114,10 +115,11 @@ export function SetupPage() {
     }
   }
 
+  const isController = status.data?.role === "controller";
   return (
     <AuthCard
-      title="Set up this node"
-      description="Create the administrator account. The node prints a one-time setup token in its log when it starts."
+      title={isController ? "Set up this controller" : "Set up this node"}
+      description={`Create the administrator account. The ${isController ? "controller" : "node"} prints a one-time setup token in its log when it starts.`}
     >
       <form className="space-y-4" onSubmit={(event) => void submit(event)}>
         <Field label="Setup token" htmlFor="token" error={error}>
@@ -169,8 +171,9 @@ export function SetupPage() {
           />
         </Field>
         <p className="rounded-md bg-surface-muted px-3 py-2 text-xs text-text-secondary">
-          By default this node keeps each query, including which device asked, for 7 days. It stays on
-          this node, and you can change it in Settings.
+          {isController
+            ? "Each node keeps its own query history. Only query counts reach this controller."
+            : "By default this node keeps each query, including which device asked, for 7 days. It stays on this node, and you can change it in Settings."}
         </p>
         <Button type="submit" variant="primary" className="w-full" disabled={pending}>
           {pending ? "Setting up…" : "Create administrator"}

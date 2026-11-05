@@ -48,10 +48,10 @@ const RESTART_DELAY: Duration = Duration::from_millis(300);
 const MIN_LIST_REFRESH_SECONDS: u64 = 300;
 const CLIENT_ACTIVITY_WINDOW_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 
-type ApiResult<T> = Result<T, ApiError>;
+pub type ApiResult<T> = Result<T, ApiError>;
 
 /// Applies a policy change off the async runtime.
-async fn mutate<T, F>(state: &AppState, change: F) -> ApiResult<(T, String)>
+pub(crate) async fn mutate<T, F>(state: &AppState, change: F) -> ApiResult<(T, String)>
 where
     T: Send + 'static,
     F: FnOnce(&mut PolicyDocument) -> Result<T, ApiError> + Send + 'static,
@@ -64,7 +64,7 @@ where
 }
 
 /// Records an action. A failure here is logged, because the change has already happened.
-async fn audit(
+pub async fn audit(
     state: &AppState,
     actor: &str,
     action: &str,
@@ -84,7 +84,7 @@ async fn audit(
     }
 }
 
-fn telemetry(state: &AppState) -> ApiResult<&Arc<Telemetry>> {
+pub(crate) fn telemetry(state: &AppState) -> ApiResult<&Arc<Telemetry>> {
     state
         .telemetry
         .as_ref()
@@ -125,6 +125,7 @@ pub async fn health_ready(_auth: AuthSession, State(state): State<AppState>) -> 
 pub async fn auth_status(State(state): State<AppState>) -> ApiResult<Json<AuthStatus>> {
     Ok(Json(AuthStatus {
         setup_required: state.db.user_count().await? == 0,
+        role: state.role,
     }))
 }
 
@@ -170,6 +171,8 @@ async fn start_session(
             csrf_token,
             expires_at: to_iso(expires_at_ms),
             policy_read_only: state.manager.is_read_only(),
+            policy_managed: state.manager.is_managed(),
+            role: state.role,
         },
     ))
 }
@@ -301,6 +304,8 @@ pub async fn auth_session(
         csrf_token: auth.session.csrf_token,
         expires_at: to_iso(auth.session.expires_at_ms),
         policy_read_only: state.manager.is_read_only(),
+        policy_managed: state.manager.is_managed(),
+        role: state.role,
     }))
 }
 
@@ -434,11 +439,25 @@ pub async fn overview(
 }
 
 /// Labels for rule and list IDs, so the UI can explain decisions.
-fn policy_labels(document: &PolicyDocument) -> (HashMap<String, String>, HashMap<String, String>) {
+/// What to call the rules a blocked service stands for.
+fn service_labels(blocked: &dns_policy::BlockedServiceDef) -> Vec<(String, String)> {
+    let Some(service) = dns_policy::find_service(&blocked.service) else {
+        return Vec::new();
+    };
+    dns_policy::service_rule_ids(blocked, service)
+        .into_iter()
+        .map(|id| (id, format!("{} (blocked service)", service.name)))
+        .collect()
+}
+
+pub(crate) fn policy_labels(
+    document: &PolicyDocument,
+) -> (HashMap<String, String>, HashMap<String, String>) {
     let rules = document
         .rules
         .iter()
         .map(|rule| (rule.id.clone(), rule.pattern.clone()))
+        .chain(document.blocked_services.iter().flat_map(service_labels))
         .collect();
     let lists = document
         .lists
@@ -795,7 +814,7 @@ pub async fn delete_rule(
     Ok(StatusCode::NO_CONTENT)
 }
 
-fn tier_name(tier: dns_policy::Tier) -> &'static str {
+pub(crate) fn tier_name(tier: dns_policy::Tier) -> &'static str {
     use dns_policy::Tier;
     match tier {
         Tier::EmergencyDeny => "emergency_deny",
@@ -811,7 +830,7 @@ fn tier_name(tier: dns_policy::Tier) -> &'static str {
     }
 }
 
-fn scope_name(scope: dns_policy::ScopeLevel) -> &'static str {
+pub(crate) fn scope_name(scope: dns_policy::ScopeLevel) -> &'static str {
     use dns_policy::ScopeLevel;
     match scope {
         ScopeLevel::Client => "client",
@@ -1205,7 +1224,7 @@ fn validate_client_shape(client: &ClientDef) -> ApiResult<()> {
 }
 
 /// How the DNS path would see an address, with whatever's known about its device.
-fn device_source(address: IpAddr, device: Option<&DeviceInfo>) -> ClientSource<'_> {
+pub(crate) fn device_source(address: IpAddr, device: Option<&DeviceInfo>) -> ClientSource<'_> {
     ClientSource {
         address,
         mac: device.and_then(|device| device.mac),
@@ -1564,14 +1583,60 @@ pub async fn list_upstreams(
             .pool
             .stats()
             .into_iter()
-            .map(|stats| UpstreamDto {
-                server: stats.server,
-                responses: stats.responses,
-                failures: stats.failures,
-                last_latency_us: stats.last_latency_us,
-            })
+            .map(|stats| upstream_dto(stats, None))
+            .chain(forward_zone_upstreams(&state))
             .collect(),
     ))
+}
+
+fn upstream_dto(stats: dns_upstreams::ServerStats, zones: Option<&str>) -> UpstreamDto {
+    UpstreamDto {
+        server: stats.server,
+        responses: stats.responses,
+        failures: stats.failures,
+        last_latency_us: stats.last_latency_us,
+        forward_zones: zones.map(str::to_owned),
+        history: stats
+            .history
+            .into_iter()
+            .map(|minute| UpstreamMinuteDto {
+                start: to_iso(i64::try_from(minute.minute.saturating_mul(60_000)).unwrap_or(0)),
+                responses: minute.responses,
+                failures: minute.failures,
+                average_latency_us: minute.average_latency_us,
+            })
+            .collect(),
+    }
+}
+
+/// The servers forward zones use. Each appears once it has been used, and zones with the same
+/// servers share them.
+fn forward_zone_upstreams(state: &AppState) -> Vec<UpstreamDto> {
+    let document = state.manager.document();
+    let mut pools: Vec<(&[String], bool, Vec<&str>)> = Vec::new();
+    for zone in &document.forward_zones {
+        let found = pools.iter_mut().find(|(servers, balanced, _)| {
+            *servers == zone.servers && *balanced == zone.load_balance
+        });
+        let names = zone.zones.iter().map(String::as_str);
+        match found {
+            Some((_, _, zones)) => zones.extend(names),
+            None => pools.push((&zone.servers, zone.load_balance, names.collect())),
+        }
+    }
+    pools
+        .into_iter()
+        .flat_map(|(servers, balanced, zones)| {
+            let label = zones.join(", ");
+            state
+                .services
+                .conditional
+                .stats(servers, balanced)
+                .into_iter()
+                .map(move |stats| upstream_dto(stats, Some(&label)))
+                .collect::<Vec<_>>()
+        })
+        .collect()
 }
 
 /// The answer cache's size and hit counts.
@@ -1589,6 +1654,8 @@ pub async fn cache_stats(
         entries: stats.map_or(0, |stats| stats.entries),
         bytes: stats.map_or(0, |stats| stats.bytes),
         max_bytes: stats.map_or(0, |stats| stats.max_bytes),
+        stale_served: stats.map_or(0, |stats| stats.stale_served),
+        prefetches: stats.map_or(0, |stats| stats.prefetches),
     }))
 }
 
@@ -1733,12 +1800,7 @@ fn forward_zone_dto(state: &AppState, zone: &ForwardZoneDef) -> ForwardZoneDto {
             .conditional
             .stats(&zone.servers, zone.load_balance)
             .into_iter()
-            .map(|stats| UpstreamDto {
-                server: stats.server,
-                responses: stats.responses,
-                failures: stats.failures,
-                last_latency_us: stats.last_latency_us,
-            })
+            .map(|stats| upstream_dto(stats, None))
             .collect(),
     }
 }
@@ -2424,6 +2486,7 @@ pub async fn activate_revision(
         .map_err(|error| match error {
             MutationError::Rejected(_) => ApiError::not_found("That revision"),
             MutationError::ReadOnly => MutationError::<ApiError>::ReadOnly.into(),
+            MutationError::Managed => MutationError::<ApiError>::Managed.into(),
             MutationError::NoStateDirectory => MutationError::<ApiError>::NoStateDirectory.into(),
             MutationError::Invalid(invalid) => MutationError::<ApiError>::Invalid(invalid).into(),
             MutationError::Storage(storage) => MutationError::<ApiError>::Storage(storage).into(),
@@ -2642,6 +2705,7 @@ pub async fn restore_backup(
                 ApiError::invalid("BACKUP_INVALID", "The backup has no usable policy")
             }
             MutationError::ReadOnly => MutationError::<ApiError>::ReadOnly.into(),
+            MutationError::Managed => MutationError::<ApiError>::Managed.into(),
             MutationError::NoStateDirectory => MutationError::<ApiError>::NoStateDirectory.into(),
             MutationError::Invalid(invalid) => MutationError::<ApiError>::Invalid(invalid).into(),
             MutationError::Storage(storage) => MutationError::<ApiError>::Storage(storage).into(),

@@ -43,6 +43,8 @@ struct Cli {
 enum Command {
     /// Serve DNS, applying policy and forwarding allowed queries upstream
     Serve(Box<ServeArgs>),
+    /// Run a central controller, which manages the policy of many nodes
+    Controller(Box<ControllerArgs>),
     /// Work with policy files
     #[command(subcommand)]
     Policy(PolicyCommand),
@@ -64,9 +66,62 @@ enum Command {
         /// The node's state directory. A DNS address saved from its dashboard is used over --address
         #[arg(long, env = "FERRIXDNS_STATE_DIR")]
         state_dir: Option<PathBuf>,
+        /// Check a controller instead, by connecting to this address
+        #[arg(long)]
+        controller: Option<SocketAddr>,
     },
     /// Print the API contract as OpenAPI JSON
     Openapi,
+}
+
+#[derive(Args)]
+struct ControllerArgs {
+    /// Address for the dashboard and for nodes to connect to
+    #[arg(
+        long,
+        env = "FERRIXDNS_CONTROLLER_LISTEN",
+        default_value = "127.0.0.1:8444"
+    )]
+    listen: SocketAddr,
+
+    /// Directory for the controller's database, policies and signing key
+    #[arg(long, env = "FERRIXDNS_STATE_DIR")]
+    state_dir: PathBuf,
+
+    /// The address nodes use to reach this controller, such as https://control.example:8444.
+    /// Enrollment tokens carry it, so it must work from the nodes. Worked out from --listen if not given
+    #[arg(long, env = "FERRIXDNS_PUBLIC_URL")]
+    public_url: Option<String>,
+
+    /// Extra host name the dashboard may be reached at (repeatable)
+    #[arg(long, env = "FERRIXDNS_WEB_HOST", value_delimiter = ',')]
+    web_host: Vec<String>,
+
+    /// Certificate chain, as PEM
+    #[arg(long, env = "FERRIXDNS_WEB_TLS_CERT", requires = "tls_key")]
+    tls_cert: Option<PathBuf>,
+
+    /// Private key, as PEM
+    #[arg(long, env = "FERRIXDNS_WEB_TLS_KEY", requires = "tls_cert")]
+    tls_key: Option<PathBuf>,
+
+    /// Use a self-signed certificate, kept in the state directory. Nodes pin it through their
+    /// enrollment token, and browsers will warn about it
+    #[arg(
+        long,
+        env = "FERRIXDNS_WEB_TLS_SELF_SIGNED",
+        conflicts_with = "tls_cert"
+    )]
+    tls_self_signed: bool,
+
+    /// Allow plain HTTP on a non-loopback address. Passwords and policies can then be read by
+    /// anyone on the network path, and nodes refuse to use it
+    #[arg(long, env = "FERRIXDNS_WEB_INSECURE_REMOTE")]
+    insecure_http: bool,
+
+    /// Let list downloads reach loopback and private addresses
+    #[arg(long, env = "FERRIXDNS_ALLOW_PRIVATE_LIST_URLS")]
+    allow_private_list_urls: bool,
 }
 
 #[derive(Subcommand)]
@@ -207,6 +262,20 @@ struct ServeArgs {
     #[arg(long, env = "FERRIXDNS_CACHE_NEGATIVE_TTL", default_value_t = 300)]
     cache_negative_ttl: u64,
 
+    /// How long to keep expired answers, to use when upstreams can't answer, in seconds. 0 turns
+    /// this off
+    #[arg(long, env = "FERRIXDNS_CACHE_STALE_SECONDS", default_value_t = 86_400)]
+    cache_stale_seconds: u64,
+
+    /// Refresh popular answers shortly before they expire
+    #[arg(
+        long,
+        env = "FERRIXDNS_CACHE_PREFETCH",
+        default_value_t = true,
+        action = clap::ArgAction::Set
+    )]
+    cache_prefetch: bool,
+
     /// Maximum requests in flight upstream
     #[arg(
         long,
@@ -222,6 +291,33 @@ struct ServeArgs {
     /// Time allowed for a whole query, in milliseconds
     #[arg(long, env = "FERRIXDNS_QUERY_TIMEOUT_MS", default_value_t = 2500)]
     query_timeout_ms: u64,
+
+    /// Serve no dashboard or API on this node. Use with a controller, which is where you then
+    /// manage it
+    #[arg(long, env = "FERRIXDNS_NO_WEB")]
+    no_web: bool,
+
+    /// Join a central controller with this one-time token. The node then takes its policy from
+    /// there. It's only needed the first time
+    #[arg(
+        long,
+        env = "FERRIXDNS_ENROLL_TOKEN",
+        requires = "state_dir",
+        conflicts_with = "policy"
+    )]
+    enroll_token: Option<String>,
+
+    /// A PEM file of the private certificate authority that signed the controller's certificate
+    #[arg(long, env = "FERRIXDNS_CONTROLLER_CA")]
+    controller_ca: Option<PathBuf>,
+
+    /// How often to report to the controller and check for new policy, in seconds
+    #[arg(long, env = "FERRIXDNS_CONTROLLER_SYNC_SECONDS", default_value_t = 10)]
+    controller_sync_seconds: u64,
+
+    /// What to call this node on the controller. This machine's host name if not given
+    #[arg(long, env = "FERRIXDNS_NODE_NAME")]
+    node_name: Option<String>,
 
     /// Address to serve NTP on (repeatable), such as 0.0.0.0:123. This shares this machine's
     /// clock, so it needs a time service like chrony on another port, or systemd-timesyncd
@@ -252,6 +348,8 @@ impl ServeArgs {
             cache_mib: self.cache_mib,
             cache_max_ttl: self.cache_max_ttl,
             cache_negative_ttl: self.cache_negative_ttl,
+            cache_stale_seconds: self.cache_stale_seconds,
+            cache_prefetch: self.cache_prefetch,
             web_listen: self
                 .web_listen
                 .map(|address| address.to_string())
@@ -292,6 +390,8 @@ impl ServeArgs {
         self.cache_mib = settings.cache_mib;
         self.cache_max_ttl = settings.cache_max_ttl;
         self.cache_negative_ttl = settings.cache_negative_ttl;
+        self.cache_stale_seconds = settings.cache_stale_seconds;
+        self.cache_prefetch = settings.cache_prefetch;
         self.web_host.clone_from(&settings.web_hosts);
         self.web_tls_self_signed = settings.web_tls_mode == WebTlsMode::SelfSigned;
         let files = settings.web_tls_mode == WebTlsMode::Files;
@@ -338,6 +438,7 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Command::Serve(args) => serve(*args).await,
+        Command::Controller(args) => run_controller(*args).await,
         Command::Policy(PolicyCommand::Validate { file }) => validate_policy(&file),
         Command::Admin(AdminCommand::ResetPassword {
             state_dir,
@@ -345,14 +446,22 @@ async fn main() -> Result<()> {
         }) => reset_password(&state_dir, &username).await,
         Command::Admin(AdminCommand::ResetSettings { state_dir }) => reset_settings(&state_dir),
         Command::Backup(command) => backup(command).await,
-        Command::Health { address, state_dir } => health(
+        Command::Health {
+            controller: Some(address),
+            ..
+        } => controller_health(address),
+        Command::Health {
+            address, state_dir, ..
+        } => health(
             state_dir
                 .as_deref()
                 .and_then(node_api::saved_dns_address)
                 .unwrap_or(address),
         ),
         Command::Openapi => {
-            println!("{}", node_api::openapi_json()?);
+            let mut contract = node_api::openapi();
+            contract.merge(control_plane::openapi());
+            println!("{}", contract.to_pretty_json()?);
             Ok(())
         }
     }
@@ -409,6 +518,14 @@ fn health(address: SocketAddr) -> Result<()> {
         bail!("{address} answered, but not correctly");
     }
     println!("{address} is answering DNS");
+    Ok(())
+}
+
+/// Checks that a controller is accepting connections.
+fn controller_health(address: SocketAddr) -> Result<()> {
+    std::net::TcpStream::connect_timeout(&address, Duration::from_secs(3))
+        .with_context(|| format!("the controller at {address} isn't accepting connections"))?;
+    println!("{address} is accepting connections");
     Ok(())
 }
 
@@ -694,6 +811,9 @@ async fn move_data_for_trial(settings: &NodeSettingsState, target: Option<&Path>
 }
 
 async fn serve(mut args: ServeArgs) -> Result<()> {
+    if args.no_web {
+        args.web_listen = None;
+    }
     let settings = apply_saved_settings(&mut args)?;
     let store = settings
         .as_ref()
@@ -751,6 +871,7 @@ async fn run_node(args: ServeArgs, settings: Option<NodeSettingsState>) -> Resul
     }
     // Compilation can be slow with large lists, so it stays off the async runtime threads.
     let state_dir = args.state_dir;
+    let args_policy = args.policy.clone();
     let (source, store_dir) = (args.policy, state_dir.clone());
     let manager = tokio::task::spawn_blocking(move || PolicyManager::start(source, store_dir))
         .await
@@ -758,11 +879,28 @@ async fn run_node(args: ServeArgs, settings: Option<NodeSettingsState>) -> Resul
         .context("failed to load the policy")?;
     let telemetry = open_telemetry(state_dir.as_deref(), &manager).await;
 
+    // A controller's policy takes over before any query is answered, and the policy file option
+    // can't be mixed with it, so there's only ever one source of policy.
+    let managed =
+        state_dir.as_deref().is_some_and(node_agent::is_enrolled) || args.enroll_token.is_some();
+    if managed {
+        if args_policy.is_some() {
+            bail!("a node that has joined a controller can't also use --policy");
+        }
+        manager.set_managed();
+    }
+    let agent_token = args.enroll_token;
+    let agent_ca = args.controller_ca;
+    let agent_name = args.node_name;
+    let sync_seconds = args.controller_sync_seconds;
+
     let cache = (args.cache_mib > 0).then(|| {
         Arc::new(DnsCache::new(CacheConfig {
             max_bytes: args.cache_mib.saturating_mul(1024 * 1024),
             max_ttl: Duration::from_secs(args.cache_max_ttl),
             negative_ttl_cap: Duration::from_secs(args.cache_negative_ttl),
+            stale_window: Duration::from_secs(args.cache_stale_seconds),
+            prefetch: args.cache_prefetch,
         }))
     });
 
@@ -817,6 +955,22 @@ async fn run_node(args: ServeArgs, settings: Option<NodeSettingsState>) -> Resul
             let _ = stopped.wait_for(|stopped| *stopped).await;
         }));
     }
+    if managed && let Some(state_dir) = state_dir.clone() {
+        let config = node_agent::AgentConfig {
+            state_dir,
+            enroll_token: agent_token,
+            controller_ca: agent_ca,
+            name: agent_name.unwrap_or_else(machine_name),
+            manager: Arc::clone(&manager),
+            telemetry: telemetry.clone(),
+            cache: cache.clone(),
+            pool: server.pool(),
+            services: server.services(),
+            listeners: server.local_addrs().to_vec(),
+            sync_interval: Some(Duration::from_secs(sync_seconds.max(1))),
+        };
+        tokio::spawn(run_agent(config));
+    }
     if let Some(web_listen) = args.web_listen {
         let web = WebOptions {
             listen: web_listen,
@@ -856,6 +1010,114 @@ async fn run_node(args: ServeArgs, settings: Option<NodeSettingsState>) -> Resul
     result.context("DNS server failed")?;
     let restarting = *restart.borrow();
     Ok(restarting)
+}
+
+/// This machine's host name.
+fn machine_name() -> String {
+    std::fs::read_to_string("/proc/sys/kernel/hostname")
+        .ok()
+        .map(|name| name.trim().to_owned())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "node".to_owned())
+}
+
+/// Keeps the node in touch with its controller. Whatever goes wrong here, DNS keeps serving.
+async fn run_agent(config: node_agent::AgentConfig) {
+    match node_agent::Agent::connect(config).await {
+        Ok(agent) => agent.run().await,
+        Err(problem) => error!(
+            %problem,
+            "this node couldn't join its controller, so it isn't getting policy from it. DNS \
+             keeps serving with the policy it has"
+        ),
+    }
+}
+
+async fn run_controller(args: ControllerArgs) -> Result<()> {
+    let uses_tls = args.tls_self_signed || args.tls_cert.is_some();
+    if !args.listen.ip().is_loopback() && !args.insecure_http && !uses_tls {
+        bail!(
+            "plain HTTP on {} would expose passwords and policies on the network. Use \
+             --tls-self-signed, or --tls-cert with --tls-key",
+            args.listen
+        );
+    }
+    std::fs::create_dir_all(&args.state_dir)
+        .with_context(|| format!("cannot create {}", args.state_dir.display()))?;
+
+    let scheme = if uses_tls { "https" } else { "http" };
+    let public_url = match args.public_url {
+        Some(url) => url,
+        None if args.listen.ip().is_unspecified() => bail!(
+            "listening on every address, this controller can't tell what address nodes should \
+             use. Set --public-url"
+        ),
+        None => format!("{scheme}://{}", args.listen),
+    };
+
+    let mut hosts = args.web_host;
+    if !args.listen.ip().is_unspecified() {
+        hosts.push(match args.listen {
+            SocketAddr::V4(address) => address.ip().to_string(),
+            SocketAddr::V6(address) => format!("[{}]", address.ip()),
+        });
+    }
+    if let Some(host) = url_host(&public_url) {
+        hosts.push(host);
+    }
+
+    let tls = match (&args.tls_cert, &args.tls_key) {
+        (Some(cert), Some(key)) => Some(tls::from_files(cert, key)?),
+        _ if args.tls_self_signed => Some(tls::self_signed(&args.state_dir, &hosts)?),
+        _ => None,
+    };
+    let tls_pin = if args.tls_self_signed {
+        Some(tls::self_signed_pin(&args.state_dir)?)
+    } else {
+        None
+    };
+
+    let listener = TcpListener::bind(args.listen)
+        .await
+        .with_context(|| format!("cannot listen on {} for the controller", args.listen))?;
+    let address = listener.local_addr()?;
+    let controller = control_plane::Controller::new(control_plane::ControllerConfig {
+        state_dir: args.state_dir,
+        public_url: public_url.clone(),
+        tls_pin,
+        hosts,
+        secure_cookies: tls.is_some(),
+        hsts: args.tls_cert.is_some(),
+        allow_private_list_urls: args.allow_private_list_urls,
+    })
+    .await?;
+    controller.start_background_work();
+
+    info!(url = %format!("{scheme}://{address}/"), %public_url, "web UI ready");
+    if let Some(token) = controller.setup_token() {
+        // Whoever can read this log can claim the controller, which is the point of the token.
+        warn!(setup_token = %token, "no administrator exists yet; use this token to set one up");
+    }
+    let app = controller.router();
+    match tls {
+        Some(tls) => node_api::serve_tls(app, listener, tls, shutdown_signal()).await?,
+        None => node_api::serve_plain(app, listener, shutdown_signal()).await?,
+    }
+    Ok(())
+}
+
+/// The host part of a URL, without its port.
+fn url_host(url: &str) -> Option<String> {
+    let rest = url.split_once("://")?.1;
+    let authority = rest.split('/').next()?;
+    if authority.starts_with('[') {
+        return authority.split_inclusive(']').next().map(str::to_owned);
+    }
+    authority
+        .split(':')
+        .next()
+        .filter(|host| !host.is_empty())
+        .map(str::to_owned)
 }
 
 struct WebOptions {
@@ -939,6 +1201,7 @@ async fn start_web(
         services: server.services(),
         ntp: web.ntp,
         node,
+        role: node_api::ServerRole::Node,
     })
     .await?;
 

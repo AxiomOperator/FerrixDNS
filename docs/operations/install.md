@@ -31,7 +31,9 @@ sudo scripts/docker-deploy.sh --address 10.0.0.5   # or choose one
 
 This builds the image, starts it with `packaging/docker/compose.yaml`, waits until DNS answers, and
 prints the dashboard address and setup token. Run it again to upgrade. `--down` stops the node and
-keeps its data, and `--help` lists the other options.
+keeps its data, and `--help` lists the other options. `--controller` deploys a central controller, and
+`--node-only` deploys a node with no dashboard that it manages. See
+[Central controller](controller.md).
 
 `sudo` isn't needed if your user can already use Docker, but a rootless Docker or Podman can't use
 port 53 with host networking.

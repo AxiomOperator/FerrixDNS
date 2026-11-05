@@ -104,6 +104,11 @@ impl From<MutationError<ApiError>> for ApiError {
                 "This node's policy comes from a file. Edit the file and send SIGHUP, or restart \
                  without --policy to manage it here.",
             ),
+            MutationError::Managed => Self::new(
+                StatusCode::CONFLICT,
+                "POLICY_MANAGED",
+                "This node's policy comes from its central controller. Change it there.",
+            ),
             MutationError::NoStateDirectory => Self::new(
                 StatusCode::CONFLICT,
                 "NO_STATE_DIRECTORY",

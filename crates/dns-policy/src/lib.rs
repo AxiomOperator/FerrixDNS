@@ -10,6 +10,7 @@ mod evaluate;
 mod forward;
 mod local;
 mod name;
+mod services;
 
 pub use compile::{
     CompileError, ListEntry, ListLayer, ListSource, MAX_REGEX_PATTERN_LEN, MatchType,
@@ -17,7 +18,7 @@ pub use compile::{
 };
 pub use device::{ClientSource, MacAddress, MacParseError};
 pub use document::{
-    ArtifactLoader, BlockConfig, BlockResponse, ClientDef, CompiledPolicy,
+    ArtifactLoader, BlockConfig, BlockResponse, BlockedServiceDef, ClientDef, CompiledPolicy,
     DEFAULT_RATE_LIMIT_PER_MINUTE, Filtering, GroupDef, Identities, Identity, ListDef, ListFormat,
     MAX_BLOCK_TTL_SECONDS, PolicyDocument, PolicyError, QueryLogMode, RateLimitConfig, RuleDef,
     SCHEMA_VERSION, TelemetryConfig, Verdict,
@@ -32,3 +33,4 @@ pub use local::{
     LocalRecordType, LocalZoneDef, LocalZones, reverse_name,
 };
 pub use name::{DomainName, NameError};
+pub use services::{SERVICES, Service, find_service, service_of_rule, service_rule_ids};

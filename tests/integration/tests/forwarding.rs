@@ -376,3 +376,32 @@ async fn load_balancing_stops_waiting_for_a_silent_server() {
         started.elapsed()
     );
 }
+
+#[tokio::test]
+async fn allowed_networks_decide_who_gets_answered_including_everyone() {
+    let fixture = Fixture::start().await;
+    let server_allowing = |networks: &[&str]| {
+        let mut options = ServerOptions::new(vec![fixture.addr]);
+        options.allow = networks
+            .iter()
+            .map(|network| network.parse().unwrap())
+            .collect();
+        start_server(options)
+    };
+
+    let everyone = server_allowing(&["0.0.0.0/0", "::/0"]).await;
+    let answer = ask(everyone, "a.fixture.test.", RecordType::A).await;
+    assert_eq!(answer.metadata.response_code, ResponseCode::NoError);
+
+    let all_of_ipv4 = server_allowing(&["0.0.0.0/0"]).await;
+    let answer = ask(all_of_ipv4, "a.fixture.test.", RecordType::A).await;
+    assert_eq!(answer.metadata.response_code, ResponseCode::NoError);
+
+    let others_only = server_allowing(&["10.0.0.0/8"]).await;
+    let answer = ask(others_only, "a.fixture.test.", RecordType::A).await;
+    assert_eq!(answer.metadata.response_code, ResponseCode::Refused);
+
+    let loopback = server_allowing(&["127.0.0.1/32"]).await;
+    let answer = ask(loopback, "a.fixture.test.", RecordType::A).await;
+    assert_eq!(answer.metadata.response_code, ResponseCode::NoError);
+}

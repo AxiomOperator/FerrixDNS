@@ -22,6 +22,9 @@ const TOP_DOMAINS_MIN_WAIT: Duration = Duration::from_secs(2);
 /// however much history there is and however many dashboards are open.
 const TOP_DOMAINS_WAIT_FACTOR: u32 = 10;
 const MAX_CACHED_RANGES: usize = 8;
+/// The largest page read at once for an export.
+const EXPORT_BATCH: u32 = 5_000;
+const ALLOWED_OUTCOMES: &[&str] = &["forwarded", "cached", "stale", "local"];
 
 #[derive(Clone, Default)]
 struct TopDomains {
@@ -60,6 +63,15 @@ pub struct QueryPage {
     pub events: Vec<QueryEvent>,
     /// Pass as `before_seq` for the next page.
     pub next_before_seq: Option<i64>,
+}
+
+/// Queries with one outcome in one minute.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MinuteCount {
+    pub bucket_start_ms: i64,
+    pub outcome: String,
+    pub count: i64,
+    pub latency_sum_us: i64,
 }
 
 /// Counts for one time bucket.
@@ -122,6 +134,7 @@ fn parse_outcome(value: &str) -> Outcome {
     match value {
         "forwarded" => Outcome::Forwarded,
         "cached" => Outcome::Cached,
+        "stale" => Outcome::Stale,
         "local" => Outcome::Local,
         "blocked" => Outcome::Blocked,
         "rejected" => Outcome::Rejected,
@@ -192,7 +205,16 @@ async fn query_segment(
 impl Telemetry {
     /// Reads a page of the query log, newest first, across daily segments.
     pub async fn query_log(&self, filter: &QueryFilter) -> QueryPage {
-        let limit = i64::from(filter.limit.clamp(1, 200));
+        self.read_log(filter, 200).await
+    }
+
+    /// Reads a larger page than [`Self::query_log`] allows, for exports.
+    pub async fn query_log_batch(&self, filter: &QueryFilter) -> QueryPage {
+        self.read_log(filter, EXPORT_BATCH).await
+    }
+
+    async fn read_log(&self, filter: &QueryFilter, largest: u32) -> QueryPage {
+        let limit = i64::from(filter.limit.clamp(1, largest));
         let directory = &self.shared.directory;
         let mut events = Vec::new();
 
@@ -274,6 +296,34 @@ impl Telemetry {
 
         let top = recent_top_domains(&self.shared, from_ms, to_ms).await;
         Ok(totals.finish(from_ms, to_ms, top.blocked, top.allowed))
+    }
+
+    /// Query counts per minute and outcome, for reporting to a controller. Client names and
+    /// addresses aren't included.
+    pub async fn minute_counts(
+        &self,
+        from_ms: i64,
+        to_ms: i64,
+    ) -> Result<Vec<MinuteCount>, TelemetryError> {
+        let rows = sqlx::query(
+            "SELECT bucket_start_ms, outcome, SUM(count) AS total, SUM(latency_sum_us) AS latency \
+             FROM query_rollups_1m WHERE bucket_start_ms >= ? AND bucket_start_ms < ? \
+             GROUP BY bucket_start_ms, outcome ORDER BY bucket_start_ms",
+        )
+        .bind(from_ms)
+        .bind(to_ms)
+        .fetch_all(&self.shared.rollups_pool)
+        .await?;
+        rows.iter()
+            .map(|row| {
+                Ok(MinuteCount {
+                    bucket_start_ms: row.try_get("bucket_start_ms")?,
+                    outcome: row.try_get("outcome")?,
+                    count: row.try_get("total")?,
+                    latency_sum_us: row.try_get("latency")?,
+                })
+            })
+            .collect()
     }
 
     /// Query counts by client key since a time, for the client inventory.
@@ -421,8 +471,8 @@ fn remember_top_domains(shared: &Shared, range: i64, value: TopDomains, took: Du
 
 async fn count_top_domains(shared: &Shared, from_ms: i64, to_ms: i64) -> TopDomains {
     TopDomains {
-        blocked: top_domains(shared, from_ms, to_ms, "blocked", "blocked", "blocked").await,
-        allowed: top_domains(shared, from_ms, to_ms, "forwarded", "cached", "local").await,
+        blocked: top_domains(shared, from_ms, to_ms, &["blocked"]).await,
+        allowed: top_domains(shared, from_ms, to_ms, ALLOWED_OUTCOMES).await,
     }
 }
 
@@ -431,10 +481,15 @@ async fn top_domains(
     shared: &Shared,
     from_ms: i64,
     to_ms: i64,
-    first: &str,
-    second: &str,
-    third: &str,
+    outcomes: &[&str],
 ) -> Vec<DomainCount> {
+    // The list is ours and fixed, and each value is still bound.
+    let placeholders = vec!["?"; outcomes.len()].join(", ");
+    let statement = format!(
+        "SELECT qname, COUNT(*) AS total FROM query_events WHERE qname IS NOT NULL \
+         AND occurred_at_ms >= ? AND occurred_at_ms <= ? AND outcome IN ({placeholders}) \
+         GROUP BY qname ORDER BY total DESC LIMIT 200"
+    );
     let directory = &shared.directory;
     let mut counts: HashMap<String, i64> = HashMap::new();
     for day in store::segment_days(directory)
@@ -444,18 +499,13 @@ async fn top_domains(
         let Ok(mut connection) = store::open_segment_for_read(directory, &day).await else {
             continue;
         };
-        let rows = sqlx::query(
-            "SELECT qname, COUNT(*) AS total FROM query_events WHERE qname IS NOT NULL \
-                 AND occurred_at_ms >= ? AND occurred_at_ms <= ? AND outcome IN (?, ?, ?) \
-                 GROUP BY qname ORDER BY total DESC LIMIT 200",
-        )
-        .bind(from_ms)
-        .bind(to_ms)
-        .bind(first)
-        .bind(second)
-        .bind(third)
-        .fetch_all(&mut connection)
-        .await;
+        let mut query = sqlx::query(sqlx::AssertSqlSafe(statement.as_str()))
+            .bind(from_ms)
+            .bind(to_ms);
+        for outcome in outcomes {
+            query = query.bind(*outcome);
+        }
+        let rows = query.fetch_all(&mut connection).await;
         let Ok(rows) = rows else {
             continue;
         };
@@ -523,7 +573,7 @@ impl Totals {
                 bucket.forwarded += count;
                 self.forwarded += count;
             }
-            "cached" => {
+            "cached" | "stale" => {
                 bucket.forwarded += count;
                 self.forwarded += count;
                 self.cached += count;

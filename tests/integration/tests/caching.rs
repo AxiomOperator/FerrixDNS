@@ -196,3 +196,114 @@ async fn cached_answers_keep_serving_when_upstream_capacity_is_full() {
     assert_eq!(cached.metadata.response_code, ResponseCode::NoError);
     slow.await.unwrap();
 }
+
+/// Upstreams that never answer, with an expired answer already in the cache.
+async fn silent_with_expired_answer(qname: &str) -> (SocketAddr, Arc<DnsCache>) {
+    let fixture = Fixture::with_mode(Mode::Silent).await;
+    let cached = start_with(fixture).await;
+    let mut message = hickory_proto::op::Message::query();
+    message.metadata.response_code = ResponseCode::NoError;
+    message.add_answer(hickory_proto::rr::Record::from_rdata(
+        integration::name(qname),
+        1,
+        hickory_proto::rr::RData::A(hickory_proto::rr::rdata::A(std::net::Ipv4Addr::new(
+            192, 0, 2, 44,
+        ))),
+    ));
+    let key = dns_cache::CacheKey {
+        name: qname.trim_end_matches('.').to_owned(),
+        record_type: RecordType::A,
+        dnssec_ok: false,
+        checking_disabled: false,
+        route: 0,
+    };
+    assert!(cached.cache.insert(key, &message, false));
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    (cached.server, cached.cache)
+}
+
+#[tokio::test]
+async fn an_expired_answer_is_used_when_upstreams_fail() {
+    let (server, cache) = silent_with_expired_answer("stale.fixture.test.").await;
+    let answer = ask(server, "stale.fixture.test.", RecordType::A).await;
+    assert_eq!(answer.metadata.response_code, ResponseCode::NoError);
+    assert_eq!(answer.answers.len(), 1);
+    assert_eq!(answer.answers[0].ttl, dns_cache::STALE_ANSWER_TTL);
+    assert_eq!(cache.stats().stale_served, 1);
+
+    // Nothing was cached for this one, so there's nothing to fall back on.
+    let unknown = ask(server, "unknown.fixture.test.", RecordType::A).await;
+    assert_eq!(unknown.metadata.response_code, ResponseCode::ServFail);
+}
+
+#[tokio::test]
+async fn policy_still_applies_to_expired_answers() {
+    let fixture = Fixture::with_mode(Mode::Silent).await;
+    let cached = start_with(fixture).await;
+    let mut message = hickory_proto::op::Message::query();
+    message.metadata.response_code = ResponseCode::NoError;
+    message.add_answer(hickory_proto::rr::Record::from_rdata(
+        integration::name("via.fixture.test."),
+        1,
+        hickory_proto::rr::RData::CNAME(hickory_proto::rr::rdata::CNAME(integration::name(
+            "tracker.example.",
+        ))),
+    ));
+    cached.cache.insert(
+        dns_cache::CacheKey {
+            name: "via.fixture.test".to_owned(),
+            record_type: RecordType::A,
+            dnssec_ok: false,
+            checking_disabled: false,
+            route: 0,
+        },
+        &message,
+        false,
+    );
+    cached
+        .policy
+        .store(Arc::new(compile(&deny("tracker.example"))));
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+
+    let answer = ask(cached.server, "via.fixture.test.", RecordType::A).await;
+    assert_eq!(answer.metadata.response_code, ResponseCode::NXDomain);
+    assert!(answer.answers.is_empty());
+}
+
+#[tokio::test]
+async fn popular_answers_are_refreshed_before_they_expire() {
+    let fixture = Fixture::start().await;
+    let cache = Arc::new(DnsCache::new(CacheConfig {
+        // The fixture's answers last 60 seconds, so this makes them due within the test.
+        max_ttl: Duration::from_secs(20),
+        ..CacheConfig::default()
+    }));
+    let mut options = ServerOptions::new(vec![fixture.addr]);
+    options.cache = Some(Arc::clone(&cache));
+    let server = start_server(options).await;
+
+    ask(server, "a.fixture.test.", RecordType::A).await;
+    ask(server, "a.fixture.test.", RecordType::A).await;
+    assert_eq!(fixture.udp_queries(), 1);
+
+    tokio::time::sleep(Duration::from_millis(18_500)).await;
+    let near_expiry = ask(server, "a.fixture.test.", RecordType::A).await;
+    assert!(near_expiry.answers[0].ttl <= 2, "this came from the cache");
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while fixture.udp_queries() < 2 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the answer was refreshed in the background");
+    assert_eq!(cache.stats().prefetches, 1);
+
+    // The answer lasts again, without any device having waited for upstream.
+    let refreshed = ask(server, "a.fixture.test.", RecordType::A).await;
+    assert!(
+        refreshed.answers[0].ttl > 15,
+        "{}",
+        refreshed.answers[0].ttl
+    );
+    assert_eq!(fixture.udp_queries(), 2);
+}

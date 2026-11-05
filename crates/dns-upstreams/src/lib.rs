@@ -10,7 +10,7 @@ mod transport;
 
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Mutex, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use hickory_proto::op::{Edns, Message, Query, ResponseCode};
 use thiserror::Error;
@@ -29,6 +29,8 @@ pub const MAX_UDP_PAYLOAD: u16 = 1232;
 const FAILURES_BEFORE_REST: u32 = 2;
 /// How long a server is set aside, so a dead one delays one query in this long, not every other one.
 const REST: Duration = Duration::from_secs(30);
+/// How many minutes of each server's history are kept, in memory.
+const HISTORY_MINUTES: usize = 60;
 
 /// How to reach a pool of upstream servers.
 #[derive(Clone, Debug)]
@@ -90,6 +92,115 @@ pub struct Forwarded {
     pub server: String,
 }
 
+/// One minute of a server's activity.
+#[derive(Debug, Default)]
+struct HistoryBucket {
+    minute: AtomicU64,
+    responses: AtomicU64,
+    failures: AtomicU64,
+    latency_sum_us: AtomicU64,
+}
+
+/// A server's activity over the last hour, per minute. Recording only touches a few atomics, and
+/// a count lost to a race at the turn of a minute doesn't matter here.
+#[derive(Debug)]
+struct ServerHistory {
+    buckets: Vec<HistoryBucket>,
+}
+
+impl Default for ServerHistory {
+    fn default() -> Self {
+        Self {
+            buckets: (0..HISTORY_MINUTES)
+                .map(|_| HistoryBucket::default())
+                .collect(),
+        }
+    }
+}
+
+fn current_minute() -> u64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs() / 60)
+}
+
+impl ServerHistory {
+    fn bucket(&self, minute: u64) -> Option<&HistoryBucket> {
+        let index = usize::try_from(minute % HISTORY_MINUTES as u64).ok()?;
+        let bucket = self.buckets.get(index)?;
+        if bucket.minute.swap(minute, Ordering::Relaxed) != minute {
+            bucket.responses.store(0, Ordering::Relaxed);
+            bucket.failures.store(0, Ordering::Relaxed);
+            bucket.latency_sum_us.store(0, Ordering::Relaxed);
+        }
+        Some(bucket)
+    }
+
+    fn note_response(&self, latency: Duration) {
+        if let Some(bucket) = self.bucket(current_minute()) {
+            bucket.responses.fetch_add(1, Ordering::Relaxed);
+            bucket.latency_sum_us.fetch_add(
+                u64::try_from(latency.as_micros()).unwrap_or(u64::MAX),
+                Ordering::Relaxed,
+            );
+        }
+    }
+
+    fn note_failure(&self) {
+        if let Some(bucket) = self.bucket(current_minute()) {
+            bucket.failures.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// The minutes with activity in the last hour, oldest first.
+    fn minutes(&self) -> Vec<MinuteStats> {
+        let now = current_minute();
+        let oldest = now.saturating_sub(HISTORY_MINUTES as u64 - 1);
+        let mut minutes: Vec<MinuteStats> = self
+            .buckets
+            .iter()
+            .filter_map(|bucket| {
+                let minute = bucket.minute.load(Ordering::Relaxed);
+                let responses = bucket.responses.load(Ordering::Relaxed);
+                let failures = bucket.failures.load(Ordering::Relaxed);
+                (minute >= oldest && minute <= now && responses + failures > 0).then(|| {
+                    MinuteStats {
+                        minute,
+                        responses,
+                        failures,
+                        average_latency_us: bucket
+                            .latency_sum_us
+                            .load(Ordering::Relaxed)
+                            .checked_div(responses)
+                            .unwrap_or(0),
+                    }
+                })
+            })
+            .collect();
+        minutes.sort_by_key(|stats| stats.minute);
+        minutes
+    }
+}
+
+/// One minute of a server's activity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MinuteStats {
+    /// Minutes since the Unix epoch.
+    pub minute: u64,
+    pub responses: u64,
+    pub failures: u64,
+    pub average_latency_us: u64,
+}
+
+/// What one server said when it was asked directly.
+#[derive(Clone, Debug)]
+pub struct Probe {
+    pub server: String,
+    pub latency: Duration,
+    /// The answer, or why there wasn't one.
+    pub result: Result<Message, String>,
+}
+
 #[derive(Debug, Default)]
 struct ServerCounters {
     responses: AtomicU64,
@@ -107,12 +218,15 @@ pub struct ServerStats {
     pub responses: u64,
     pub failures: u64,
     pub last_latency_us: u64,
+    /// The minutes with activity in the last hour, oldest first.
+    pub history: Vec<MinuteStats>,
 }
 
 struct PooledServer {
     label: String,
     transport: Transport,
     counters: ServerCounters,
+    history: ServerHistory,
 }
 
 /// A pool of upstream servers.
@@ -138,6 +252,7 @@ impl UpstreamPool {
                     label: server.to_string(),
                     transport: Transport::new(server, &tls_roots)?,
                     counters: ServerCounters::default(),
+                    history: ServerHistory::default(),
                 })
             })
             .collect::<Result<Vec<_>, PoolConfigError>>()?;
@@ -162,6 +277,7 @@ impl UpstreamPool {
                 responses: server.counters.responses.load(Ordering::Relaxed),
                 failures: server.counters.failures.load(Ordering::Relaxed),
                 last_latency_us: server.counters.last_latency_us.load(Ordering::Relaxed),
+                history: server.history.minutes(),
             })
             .collect()
     }
@@ -250,6 +366,7 @@ impl UpstreamPool {
                 match timeout(budget, exchange).await {
                     Ok(Ok(response)) if is_retryable(response.metadata.response_code) => {
                         self.note_reachable(server);
+                        server.history.note_failure();
                         server.counters.failures.fetch_add(1, Ordering::Relaxed);
                         // Query names stay out of WARN and INFO logs for privacy (spec section 7.3).
                         warn!(
@@ -266,6 +383,7 @@ impl UpstreamPool {
                         self.note_reachable(server);
                         debug!(server = %label, round, query = %request.query, "upstream answered");
                         server.counters.responses.fetch_add(1, Ordering::Relaxed);
+                        server.history.note_response(started.elapsed());
                         let latency = u64::try_from(started.elapsed().as_micros());
                         server
                             .counters
@@ -282,11 +400,13 @@ impl UpstreamPool {
                     }
                     Ok(Err(error)) => {
                         self.note_unreachable(server);
+                        server.history.note_failure();
                         server.counters.failures.fetch_add(1, Ordering::Relaxed);
                         warn!(server = %label, round, %error, "upstream exchange failed");
                     }
                     Err(_) => {
                         self.note_unreachable(server);
+                        server.history.note_failure();
                         server.counters.failures.fetch_add(1, Ordering::Relaxed);
                         let error = ExchangeError::Timeout;
                         warn!(server = %label, round, %error, "upstream exchange failed");
@@ -295,6 +415,31 @@ impl UpstreamPool {
             }
         }
         last_failure.ok_or(UpstreamError::AllFailed)
+    }
+
+    /// Asks every server once, at the same time, for diagnostics. Their counts aren't affected, so
+    /// looking into a problem doesn't change what the dashboard reports about it.
+    pub async fn probe(&self, request: &UpstreamRequest) -> Vec<Probe> {
+        let probes = self.servers.iter().map(|server| async move {
+            let started = Instant::now();
+            let result = match encode_query(request, server.transport.uses_zero_id()) {
+                Ok((id, wire)) => {
+                    let exchange = server.transport.exchange(&wire, id, &request.query);
+                    match timeout(self.attempt_timeout, exchange).await {
+                        Ok(Ok(response)) => Ok(response),
+                        Ok(Err(error)) => Err(error.to_string()),
+                        Err(_) => Err(ExchangeError::Timeout.to_string()),
+                    }
+                }
+                Err(error) => Err(error.to_string()),
+            };
+            Probe {
+                server: server.label.clone(),
+                latency: started.elapsed(),
+                result,
+            }
+        });
+        futures_util::future::join_all(probes).await
     }
 }
 

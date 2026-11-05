@@ -14,7 +14,8 @@ use dns_upstreams::{
 };
 use hickory_server::net::runtime::Time;
 use hickory_server::proto::op::{
-    Edns, Header, HeaderCounts, LowerQuery, Message, MessageType, Metadata, OpCode, ResponseCode,
+    Edns, Header, HeaderCounts, LowerQuery, Message, MessageType, Metadata, OpCode, Query,
+    ResponseCode,
 };
 use hickory_server::proto::rr::rdata::opt::EdnsOption;
 use hickory_server::proto::rr::rdata::{A, AAAA, CNAME, NS, PTR, SOA};
@@ -36,6 +37,9 @@ const EDE_BLOCKED: [u8; 2] = 15_u16.to_be_bytes();
 /// The "DNSSEC Bogus" Extended DNS Error (RFC 8914 section 4.7).
 const EDE_DNSSEC_BOGUS: [u8; 2] = 6_u16.to_be_bytes();
 
+/// Background refreshes in flight. Beyond this they're skipped, because they're only an optimization.
+const MAX_PREFETCHES: usize = 64;
+
 /// Validates requests, applies policy and forwards allowed queries upstream.
 pub struct ForwardHandler {
     pool: Arc<UpstreamPool>,
@@ -43,8 +47,9 @@ pub struct ForwardHandler {
     policy: PolicyHandle,
     telemetry: Option<Arc<Telemetry>>,
     cache: Option<Arc<DnsCache>>,
-    validator: Option<DnssecValidator>,
+    validator: Option<Arc<DnssecValidator>>,
     services: Services,
+    prefetch_permits: Arc<Semaphore>,
 }
 
 /// What a handler is built from.
@@ -130,6 +135,15 @@ struct AnswerMeta<'a> {
     validated: bool,
     /// The server that answered, or `None` for an answer from the cache.
     upstream: Option<String>,
+    /// This is an expired answer, used because upstreams couldn't answer.
+    stale: bool,
+}
+
+/// What's needed to look a question up again, either for a client or in the background.
+struct Lookup<'a> {
+    key: Option<CacheKey>,
+    route: Option<&'a (u32, Arc<[String]>, bool)>,
+    edns: Option<EdnsRequest>,
 }
 
 enum AnswerAction {
@@ -146,8 +160,9 @@ impl ForwardHandler {
             policy: config.policy,
             telemetry: config.telemetry,
             cache: config.cache,
-            validator: config.validator,
+            validator: config.validator.map(Arc::new),
             services: config.services,
+            prefetch_permits: Arc::new(Semaphore::new(MAX_PREFETCHES)),
         }
     }
 
@@ -323,6 +338,15 @@ impl ForwardHandler {
         if let (Some(cache), Some(key)) = (&self.cache, &cache_key)
             && let Some(hit) = cache.get(key)
         {
+            if hit.refresh_due {
+                self.refresh_in_background(
+                    key.clone(),
+                    question.original().clone(),
+                    request,
+                    route.as_ref(),
+                    edns,
+                );
+            }
             return self
                 .finish_answer(
                     request,
@@ -334,14 +358,91 @@ impl ForwardHandler {
                         dnssec_ok,
                         validated: hit.validated,
                         upstream: None,
+                        stale: false,
                     },
                     response_handle,
                 )
                 .await;
         }
+        let lookup = Lookup {
+            key: cache_key,
+            route: route.as_ref(),
+            edns,
+        };
+        self.forward(request, question, &name, &caller, lookup, response_handle)
+            .await
+    }
 
+    /// Answers with an expired answer, if there is one, for when upstreams can't give a fresh one.
+    async fn answer_stale<R: ResponseHandler>(
+        &self,
+        request: &Request,
+        question: &LowerQuery,
+        name: &DomainName,
+        caller: &Caller,
+        key: Option<&CacheKey>,
+        response_handle: R,
+    ) -> Option<Finished> {
+        let cache = self.cache.as_ref()?;
+        let stale = cache.get_stale(key?)?;
+        let dnssec_ok = request
+            .edns
+            .as_ref()
+            .is_some_and(|edns| edns.flags().dnssec_ok);
+        debug!(
+            name = name.as_str(),
+            "upstreams failed, so answering with an expired answer"
+        );
+        Some(
+            self.finish_answer(
+                request,
+                question,
+                name,
+                stale.message,
+                AnswerMeta {
+                    caller,
+                    dnssec_ok,
+                    validated: false,
+                    upstream: None,
+                    stale: true,
+                },
+                response_handle,
+            )
+            .await,
+        )
+    }
+
+    /// Gets a new answer from upstream, falling back on an expired one if that fails.
+    async fn forward<R: ResponseHandler>(
+        &self,
+        request: &Request,
+        question: &LowerQuery,
+        name: &DomainName,
+        caller: &Caller,
+        lookup: Lookup<'_>,
+        response_handle: R,
+    ) -> Finished {
+        let Lookup {
+            key: cache_key,
+            route,
+            edns,
+        } = lookup;
+        let dnssec_ok = edns.is_some_and(|edns| edns.dnssec_ok);
         let Ok(_permit) = self.permits.try_acquire() else {
             debug!(src = %request.src(), "over the concurrent request limit");
+            if let Some(finished) = self
+                .answer_stale(
+                    request,
+                    question,
+                    name,
+                    caller,
+                    cache_key.as_ref(),
+                    response_handle.clone(),
+                )
+                .await
+            {
+                return finished;
+            }
             let info = send_error(request, ResponseCode::ServFail, response_handle).await;
             return Finished::plain(info, Outcome::Failed);
         };
@@ -356,6 +457,19 @@ impl ForwardHandler {
                 Ok(validated) => validated,
                 Err(error) => {
                     warn!(%error, "forwarding failed");
+                    if let Some(finished) = self
+                        .answer_stale(
+                            request,
+                            question,
+                            name,
+                            caller,
+                            cache_key.as_ref(),
+                            response_handle.clone(),
+                        )
+                        .await
+                    {
+                        return finished;
+                    }
                     let info = send_error(request, ResponseCode::ServFail, response_handle).await;
                     return Finished::plain(info, Outcome::Failed);
                 }
@@ -365,6 +479,20 @@ impl ForwardHandler {
                 let info = send_dnssec_bogus(request, response_handle).await;
                 return Finished::plain(info, Outcome::Failed);
             }
+            if is_failure(validated.message.metadata.response_code)
+                && let Some(finished) = self
+                    .answer_stale(
+                        request,
+                        question,
+                        name,
+                        caller,
+                        cache_key.as_ref(),
+                        response_handle.clone(),
+                    )
+                    .await
+            {
+                return finished;
+            }
             let secure = validated.status == DnssecStatus::Secure;
             if let (Some(cache), Some(key)) = (&self.cache, cache_key) {
                 cache.insert(key, &validated.message, secure);
@@ -373,13 +501,14 @@ impl ForwardHandler {
                 .finish_answer(
                     request,
                     question,
-                    &name,
+                    name,
                     validated.message,
                     AnswerMeta {
-                        caller: &caller,
+                        caller,
                         dnssec_ok,
                         validated: secure,
                         upstream: self.pool.last_server(),
+                        stale: false,
                     },
                     response_handle,
                 )
@@ -393,7 +522,7 @@ impl ForwardHandler {
             edns,
         };
 
-        let pool = match &route {
+        let pool = match route {
             Some((_, servers, load_balance)) => {
                 match self.services.conditional.pool(servers, *load_balance) {
                     Ok(pool) => pool,
@@ -411,10 +540,37 @@ impl ForwardHandler {
             Ok(forwarded) => forwarded,
             Err(error) => {
                 warn!(%error, "forwarding failed");
+                if let Some(finished) = self
+                    .answer_stale(
+                        request,
+                        question,
+                        name,
+                        caller,
+                        cache_key.as_ref(),
+                        response_handle.clone(),
+                    )
+                    .await
+                {
+                    return finished;
+                }
                 let info = send_error(request, ResponseCode::ServFail, response_handle).await;
                 return Finished::plain(info, Outcome::Failed);
             }
         };
+        if is_failure(forwarded.message.metadata.response_code)
+            && let Some(finished) = self
+                .answer_stale(
+                    request,
+                    question,
+                    name,
+                    caller,
+                    cache_key.as_ref(),
+                    response_handle.clone(),
+                )
+                .await
+        {
+            return finished;
+        }
 
         // The answer is stored before policy runs, because the cache holds upstream answers and
         // never policy decisions. Policy checks every answer, wherever it came from.
@@ -424,17 +580,70 @@ impl ForwardHandler {
         self.finish_answer(
             request,
             question,
-            &name,
+            name,
             forwarded.message,
             AnswerMeta {
-                caller: &caller,
+                caller,
                 dnssec_ok,
                 validated: false,
                 upstream: Some(forwarded.server),
+                stale: false,
             },
             response_handle,
         )
         .await
+    }
+
+    /// Refreshes an answer that's about to expire, so the next client doesn't wait for upstream.
+    ///
+    /// This is only an optimization, so it's skipped when busy, and a failure changes nothing.
+    fn refresh_in_background(
+        &self,
+        key: CacheKey,
+        query: Query,
+        request: &Request,
+        route: Option<&(u32, Arc<[String]>, bool)>,
+        edns: Option<EdnsRequest>,
+    ) {
+        let Some(cache) = self.cache.clone() else {
+            return;
+        };
+        let Ok(permit) = Arc::clone(&self.prefetch_permits).try_acquire_owned() else {
+            return;
+        };
+        let checking_disabled = request.metadata.checking_disabled;
+        let validator = self
+            .validator
+            .clone()
+            .filter(|_| !checking_disabled && route.is_none());
+        let pool = match route {
+            Some((_, servers, load_balance)) => {
+                match self.services.conditional.pool(servers, *load_balance) {
+                    Ok(pool) => pool,
+                    Err(_) => return,
+                }
+            }
+            None => Arc::clone(&self.pool),
+        };
+        let upstream_request = UpstreamRequest {
+            query: query.clone(),
+            recursion_desired: request.metadata.recursion_desired,
+            checking_disabled,
+            edns,
+        };
+        tokio::spawn(async move {
+            let _permit = permit;
+            if let Some(validator) = validator {
+                if let Ok(validated) = validator.resolve(query).await
+                    && validated.status != DnssecStatus::Bogus
+                {
+                    let secure = validated.status == DnssecStatus::Secure;
+                    cache.insert(key, &validated.message, secure);
+                }
+            } else if let Ok(forwarded) = pool.forward(&upstream_request).await {
+                cache.insert(key, &forwarded.message, false);
+            }
+        });
     }
 
     /// Answers from local zones and reserved names, if this node owns the question.
@@ -501,6 +710,7 @@ impl ForwardHandler {
             dnssec_ok,
             validated,
             upstream,
+            stale,
         } = meta;
         let action = match cname_targets(&message) {
             Some(targets) => self.answer_action(caller, name, &targets),
@@ -518,6 +728,7 @@ impl ForwardHandler {
                 let outcome = match (failed, &upstream) {
                     (true, _) => Outcome::Failed,
                     (false, Some(_)) => Outcome::Forwarded,
+                    (false, None) if stale => Outcome::Stale,
                     (false, None) => Outcome::Cached,
                 };
                 Finished {
@@ -599,6 +810,11 @@ impl ForwardHandler {
         };
         telemetry.record(event, policy.telemetry().mode);
     }
+}
+
+/// Upstream gave no usable answer, as opposed to an answer saying the name doesn't exist.
+fn is_failure(code: ResponseCode) -> bool {
+    matches!(code, ResponseCode::ServFail | ResponseCode::Refused)
 }
 
 fn local_query(record_type: RecordType) -> LocalQuery {

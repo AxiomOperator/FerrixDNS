@@ -63,6 +63,16 @@ pub fn self_signed(state_dir: &Path, names: &[String]) -> Result<Arc<ServerConfi
     node_api::tls_server_config(chain, key).map_err(anyhow::Error::msg)
 }
 
+/// The SHA-256 of the self-signed certificate, for nodes to pin.
+pub fn self_signed_pin(state_dir: &Path) -> Result<String> {
+    let path = state_dir.join(SELF_SIGNED_CERT);
+    let chain = CertificateDer::pem_file_iter(&path)
+        .and_then(Iterator::collect::<Result<Vec<_>, _>>)
+        .with_context(|| format!("cannot read {}", path.display()))?;
+    let certificate = chain.first().context("the certificate file is empty")?;
+    Ok(dns_storage::sha256_hex(certificate))
+}
+
 fn write_private(path: &Path, content: &[u8]) -> Result<()> {
     use std::io::Write;
 

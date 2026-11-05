@@ -191,3 +191,111 @@ export async function startNode({ fixedPorts = false } = {}): Promise<Node> {
     },
   };
 }
+
+function rcodeFor(port: number, name: string): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const socket = dgram.createSocket("udp4");
+    const header = Buffer.from([0x12, 0x34, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0]);
+    const packet = Buffer.concat([header, encodeName(name), Buffer.from([0, 1, 0, 1])]);
+    const timer = setTimeout(() => {
+      socket.close();
+      reject(new Error(`no DNS answer for ${name}`));
+    }, 5000);
+    socket.on("message", (reply) => {
+      clearTimeout(timer);
+      socket.close();
+      resolve((reply[3] ?? 0) & 0x0f);
+    });
+    socket.send(packet, port, "127.0.0.1");
+  });
+}
+
+export interface Controller {
+  url: string;
+  setupToken: string;
+  stop(): Promise<void>;
+}
+
+function waitForLog(child: ChildProcess, match: (line: string) => boolean, what: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`timed out waiting for ${what}`)), 30_000);
+    child.once("exit", (code) => reject(new Error(`exited early with code ${code}, waiting for ${what}`)));
+    if (!child.stderr) throw new Error("no stderr");
+    createInterface({ input: child.stderr }).on("line", (line) => {
+      if (match(line)) {
+        clearTimeout(timer);
+        resolve(line);
+      }
+    });
+  });
+}
+
+function stopChild(child: ChildProcess, stateDir: string): Promise<void> {
+  return new Promise((resolve) => {
+    child.once("exit", () => {
+      rmSync(stateDir, { recursive: true, force: true });
+      resolve();
+    });
+    child.kill("SIGTERM");
+  });
+}
+
+/** Runs a real central controller, over TLS as it would be deployed. Browsers then use HTTP/2. */
+export async function startController(): Promise<Controller> {
+  const stateDir = mkdtempSync(path.join(tmpdir(), "ferrix-controller-"));
+  const port = await freePort();
+  const child = spawn(
+    path.join(REPO_ROOT, "target/debug/ferrixdns"),
+    ["controller", "--listen", `127.0.0.1:${port}`, "--state-dir", stateDir, "--tls-self-signed"],
+    { stdio: ["ignore", "ignore", "pipe"], env: { ...process.env, NO_COLOR: "1", RUST_LOG: "info" } },
+  );
+  const line = await waitForLog(child, (text) => text.includes("setup_token="), "the setup token");
+  const setupToken = /setup_token=([0-9a-f]+)/.exec(line)?.[1] ?? "";
+  // The token is logged just before the server starts accepting connections.
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  return {
+    url: `https://127.0.0.1:${port}`,
+    setupToken,
+    stop: () => stopChild(child, stateDir),
+  };
+}
+
+export interface NodeOnly {
+  dnsPort: number;
+  webPort: number;
+  rcode(name: string): Promise<number>;
+  stop(): Promise<void>;
+}
+
+/** Runs a real node with no dashboard, joining a controller with a token. */
+export async function startNodeOnly(token: string, name: string): Promise<NodeOnly> {
+  const stateDir = mkdtempSync(path.join(tmpdir(), "ferrix-node-only-"));
+  const upstream = await startUpstream();
+  const dnsPort = await freePort();
+  const webPort = await freePort();
+  const child = spawn(
+    path.join(REPO_ROOT, "target/debug/ferrixdns"),
+    [
+      "serve",
+      "--listen", `127.0.0.1:${dnsPort}`,
+      "--upstream", `127.0.0.1:${(upstream.address() as AddressInfo).port}`,
+      "--state-dir", stateDir,
+      "--web-listen", `127.0.0.1:${webPort}`,
+      "--no-web",
+      "--enroll-token", token,
+      "--node-name", name,
+      "--controller-sync-seconds", "1",
+    ],
+    { stdio: ["ignore", "ignore", "pipe"], env: { ...process.env, NO_COLOR: "1", RUST_LOG: "info,hickory_server=warn" } },
+  );
+  await waitForLog(child, (text) => text.includes("joined the controller"), "the node to join");
+  return {
+    dnsPort,
+    webPort,
+    rcode: (query) => rcodeFor(dnsPort, query),
+    stop: async () => {
+      await stopChild(child, stateDir);
+      upstream.close();
+    },
+  };
+}

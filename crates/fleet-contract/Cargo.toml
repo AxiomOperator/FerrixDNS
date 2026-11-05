@@ -1,0 +1,18 @@
+[package]
+name = "fleet-contract"
+description = "What nodes and the central controller say to each other, and how it's signed."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+base64.workspace = true
+ring.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

@@ -7,11 +7,14 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Table, TableWrap, Td, Th } from "@/components/ui/table";
 import { type Schemas, errorMessage } from "@/lib/api/client";
+import { UpstreamHistory } from "@/features/upstream-history";
 import { api, queries } from "@/lib/api/hooks";
 import { formatCount, formatDuration } from "@/lib/format";
 
 export function UpstreamsPage() {
   const upstreams = useQuery(queries.upstreams());
+  const servers = upstreams.data?.filter((upstream) => !upstream.forward_zones);
+  const zoneServers = upstreams.data?.filter((upstream) => upstream.forward_zones) ?? [];
   const client = useQueryClient();
   const [result, setResult] = useState<Schemas["UpstreamTestResult"]>();
   const test = useMutation({
@@ -51,8 +54,8 @@ export function UpstreamsPage() {
       <Card>
         {upstreams.isPending && <Loading />}
         {upstreams.isError && <ErrorState error={upstreams.error} onRetry={() => void upstreams.refetch()} />}
-        {upstreams.data?.length === 0 && <Empty title="No upstream servers" />}
-        {upstreams.data && upstreams.data.length > 0 && (
+        {servers?.length === 0 && <Empty title="No upstream servers" />}
+        {servers && servers.length > 0 && (
           <TableWrap>
             <Table>
               <thead>
@@ -65,7 +68,7 @@ export function UpstreamsPage() {
                 </tr>
               </thead>
               <tbody>
-                {upstreams.data.map((upstream, index) => (
+                {servers.map((upstream, index) => (
                   <tr key={upstream.server}>
                     <Td>{index + 1}</Td>
                     <Td className="font-medium">{upstream.server}</Td>
@@ -82,6 +85,23 @@ export function UpstreamsPage() {
         )}
       </Card>
       <p className="mt-2 text-xs text-text-muted">Counts are since the node last started.</p>
+      <div className="mt-4 grid items-start gap-4 lg:grid-cols-2">
+        {servers?.map((upstream) => <UpstreamHistory key={upstream.server} upstream={upstream} />)}
+      </div>
+      {zoneServers.length > 0 && (
+        <>
+          <h2 className="mt-6 mb-1 text-sm font-semibold">Conditional forwarding servers</h2>
+          <p className="mb-3 text-xs text-text-muted">Each appears once a query has used it.</p>
+          <div className="grid items-start gap-4 lg:grid-cols-2">
+            {zoneServers.map((upstream) => (
+              <div key={`${upstream.forward_zones}-${upstream.server}`}>
+                <p className="mb-1 truncate text-xs text-text-secondary">For {upstream.forward_zones}</p>
+                <UpstreamHistory upstream={upstream} />
+              </div>
+            ))}
+          </div>
+        </>
+      )}
     </>
   );
 }

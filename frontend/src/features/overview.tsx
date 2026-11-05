@@ -120,7 +120,12 @@ function ChartTooltip({
   );
 }
 
-function TrafficChart({ data }: { data: Schemas["OverviewDto"] }) {
+export type TrafficData = Pick<
+  Schemas["OverviewDto"],
+  "buckets" | "bucket_seconds" | "forwarded" | "blocked" | "failed"
+>;
+
+export function TrafficChart({ data }: { data: TrafficData }) {
   const [showTable, setShowTable] = useState(false);
   const longRange = data.bucket_seconds >= 3600;
   const tickFormat = (value: string) => format(new Date(value), longRange ? "MMM d" : "HH:mm");

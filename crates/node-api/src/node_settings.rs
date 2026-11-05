@@ -69,6 +69,10 @@ pub struct NodeSettings {
     pub cache_mib: u64,
     pub cache_max_ttl: u64,
     pub cache_negative_ttl: u64,
+    /// How long expired answers are kept, to use when upstreams can't answer, in seconds. 0 is off.
+    pub cache_stale_seconds: u64,
+    /// Refreshes popular answers shortly before they expire.
+    pub cache_prefetch: bool,
     pub web_listen: String,
     pub web_hosts: Vec<String>,
     pub web_tls_mode: WebTlsMode,
@@ -201,6 +205,10 @@ impl NodeSettings {
         require(
             self.cache_negative_ttl <= MAX_TTL_SECONDS,
             "The cache time for \"not found\" answers can be at most 7 days",
+        )?;
+        require(
+            self.cache_stale_seconds <= MAX_TTL_SECONDS,
+            "Expired answers can be kept for at most 7 days",
         )?;
 
         require(!clean.state_dir.is_empty(), "Give a data folder")?;

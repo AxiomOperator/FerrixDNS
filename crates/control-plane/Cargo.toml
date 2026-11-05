@@ -1,0 +1,31 @@
+[package]
+name = "control-plane"
+description = "The central controller: sites, nodes, signed policy bundles and fleet metrics."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+axum.workspace = true
+dns-lists.workspace = true
+dns-policy.workspace = true
+dns-runtime.workspace = true
+dns-storage.workspace = true
+dns-upstreams.workspace = true
+fleet-contract.workspace = true
+node-api.workspace = true
+rand.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sqlx.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tower.workspace = true
+tracing.workspace = true
+ulid.workspace = true
+utoipa.workspace = true
+
+[lints]
+workspace = true

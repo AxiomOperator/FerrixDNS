@@ -6,12 +6,12 @@ and decisions are recorded in [`docs/adr/`](docs/adr/).
 
 **Status:** early development, not yet production-tested. A standalone node filters and caches DNS,
 serves local zones, supports encrypted upstreams, conditional forwarding and DNSSEC validation, and
-has a web dashboard with backup and restore. The central controller for managing many nodes isn't
-built yet.
+has a web dashboard with backup and restore. A central controller can manage the policy of many nodes.
 
 - [Installing and running a node](docs/operations/install.md): packages, containers, TLS and upgrades
 - [Backup and restore](docs/operations/backup.md)
 - [Network features](docs/operations/network.md): pausing, device identity, forwarding, query limits and NTP
+- [Central controller and node-only deployment](docs/operations/controller.md)
 - [Performance measurements](docs/performance.md)
 
 ## Try the dashboard

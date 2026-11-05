@@ -14,6 +14,7 @@ import { Route as LoginRouteImport } from './routes/login'
 import { Route as SetupRouteImport } from './routes/setup'
 import { Route as AuthenticatedIndexRouteImport } from './routes/_authenticated.index'
 import { Route as AuthenticatedClientsRouteImport } from './routes/_authenticated.clients'
+import { Route as AuthenticatedDiagnosticsRouteImport } from './routes/_authenticated.diagnostics'
 import { Route as AuthenticatedGroupsRouteImport } from './routes/_authenticated.groups'
 import { Route as AuthenticatedNetworkRouteImport } from './routes/_authenticated.network'
 import { Route as AuthenticatedQueriesRouteImport } from './routes/_authenticated.queries'
@@ -25,6 +26,12 @@ import { Route as AuthenticatedDnsRecordsRouteImport } from './routes/_authentic
 import { Route as AuthenticatedDnsUpstreamsRouteImport } from './routes/_authenticated.dns.upstreams'
 import { Route as AuthenticatedFilteringListsRouteImport } from './routes/_authenticated.filtering.lists'
 import { Route as AuthenticatedFilteringRulesRouteImport } from './routes/_authenticated.filtering.rules'
+import { Route as AuthenticatedFilteringServicesRouteImport } from './routes/_authenticated.filtering.services'
+import { Route as AuthenticatedFleetActivityRouteImport } from './routes/_authenticated.fleet.activity'
+import { Route as AuthenticatedFleetDeploymentsRouteImport } from './routes/_authenticated.fleet.deployments'
+import { Route as AuthenticatedFleetNodesRouteImport } from './routes/_authenticated.fleet.nodes'
+import { Route as AuthenticatedFleetPolicySettingsRouteImport } from './routes/_authenticated.fleet.policy-settings'
+import { Route as AuthenticatedFleetSitesRouteImport } from './routes/_authenticated.fleet.sites'
 
 const AuthenticatedRoute = AuthenticatedRouteImport.update({
   id: '/_authenticated',
@@ -50,6 +57,12 @@ const AuthenticatedClientsRoute = AuthenticatedClientsRouteImport.update({
   path: '/clients',
   getParentRoute: () => AuthenticatedRoute,
 } as any)
+const AuthenticatedDiagnosticsRoute =
+  AuthenticatedDiagnosticsRouteImport.update({
+    id: '/diagnostics',
+    path: '/diagnostics',
+    getParentRoute: () => AuthenticatedRoute,
+  } as any)
 const AuthenticatedGroupsRoute = AuthenticatedGroupsRouteImport.update({
   id: '/groups',
   path: '/groups',
@@ -109,12 +122,47 @@ const AuthenticatedFilteringRulesRoute =
     path: '/filtering/rules',
     getParentRoute: () => AuthenticatedRoute,
   } as any)
+const AuthenticatedFilteringServicesRoute =
+  AuthenticatedFilteringServicesRouteImport.update({
+    id: '/filtering/services',
+    path: '/filtering/services',
+    getParentRoute: () => AuthenticatedRoute,
+  } as any)
+const AuthenticatedFleetActivityRoute =
+  AuthenticatedFleetActivityRouteImport.update({
+    id: '/fleet/activity',
+    path: '/fleet/activity',
+    getParentRoute: () => AuthenticatedRoute,
+  } as any)
+const AuthenticatedFleetDeploymentsRoute =
+  AuthenticatedFleetDeploymentsRouteImport.update({
+    id: '/fleet/deployments',
+    path: '/fleet/deployments',
+    getParentRoute: () => AuthenticatedRoute,
+  } as any)
+const AuthenticatedFleetNodesRoute = AuthenticatedFleetNodesRouteImport.update({
+  id: '/fleet/nodes',
+  path: '/fleet/nodes',
+  getParentRoute: () => AuthenticatedRoute,
+} as any)
+const AuthenticatedFleetPolicySettingsRoute =
+  AuthenticatedFleetPolicySettingsRouteImport.update({
+    id: '/fleet/policy-settings',
+    path: '/fleet/policy-settings',
+    getParentRoute: () => AuthenticatedRoute,
+  } as any)
+const AuthenticatedFleetSitesRoute = AuthenticatedFleetSitesRouteImport.update({
+  id: '/fleet/sites',
+  path: '/fleet/sites',
+  getParentRoute: () => AuthenticatedRoute,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof AuthenticatedIndexRoute
   '/login': typeof LoginRoute
   '/setup': typeof SetupRoute
   '/clients': typeof AuthenticatedClientsRoute
+  '/diagnostics': typeof AuthenticatedDiagnosticsRoute
   '/groups': typeof AuthenticatedGroupsRoute
   '/network': typeof AuthenticatedNetworkRoute
   '/queries': typeof AuthenticatedQueriesRoute
@@ -126,11 +174,18 @@ export interface FileRoutesByFullPath {
   '/dns/upstreams': typeof AuthenticatedDnsUpstreamsRoute
   '/filtering/lists': typeof AuthenticatedFilteringListsRoute
   '/filtering/rules': typeof AuthenticatedFilteringRulesRoute
+  '/filtering/services': typeof AuthenticatedFilteringServicesRoute
+  '/fleet/activity': typeof AuthenticatedFleetActivityRoute
+  '/fleet/deployments': typeof AuthenticatedFleetDeploymentsRoute
+  '/fleet/nodes': typeof AuthenticatedFleetNodesRoute
+  '/fleet/policy-settings': typeof AuthenticatedFleetPolicySettingsRoute
+  '/fleet/sites': typeof AuthenticatedFleetSitesRoute
 }
 export interface FileRoutesByTo {
   '/login': typeof LoginRoute
   '/setup': typeof SetupRoute
   '/clients': typeof AuthenticatedClientsRoute
+  '/diagnostics': typeof AuthenticatedDiagnosticsRoute
   '/groups': typeof AuthenticatedGroupsRoute
   '/network': typeof AuthenticatedNetworkRoute
   '/queries': typeof AuthenticatedQueriesRoute
@@ -143,6 +198,12 @@ export interface FileRoutesByTo {
   '/dns/upstreams': typeof AuthenticatedDnsUpstreamsRoute
   '/filtering/lists': typeof AuthenticatedFilteringListsRoute
   '/filtering/rules': typeof AuthenticatedFilteringRulesRoute
+  '/filtering/services': typeof AuthenticatedFilteringServicesRoute
+  '/fleet/activity': typeof AuthenticatedFleetActivityRoute
+  '/fleet/deployments': typeof AuthenticatedFleetDeploymentsRoute
+  '/fleet/nodes': typeof AuthenticatedFleetNodesRoute
+  '/fleet/policy-settings': typeof AuthenticatedFleetPolicySettingsRoute
+  '/fleet/sites': typeof AuthenticatedFleetSitesRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -150,6 +211,7 @@ export interface FileRoutesById {
   '/login': typeof LoginRoute
   '/setup': typeof SetupRoute
   '/_authenticated/clients': typeof AuthenticatedClientsRoute
+  '/_authenticated/diagnostics': typeof AuthenticatedDiagnosticsRoute
   '/_authenticated/groups': typeof AuthenticatedGroupsRoute
   '/_authenticated/network': typeof AuthenticatedNetworkRoute
   '/_authenticated/queries': typeof AuthenticatedQueriesRoute
@@ -162,6 +224,12 @@ export interface FileRoutesById {
   '/_authenticated/dns/upstreams': typeof AuthenticatedDnsUpstreamsRoute
   '/_authenticated/filtering/lists': typeof AuthenticatedFilteringListsRoute
   '/_authenticated/filtering/rules': typeof AuthenticatedFilteringRulesRoute
+  '/_authenticated/filtering/services': typeof AuthenticatedFilteringServicesRoute
+  '/_authenticated/fleet/activity': typeof AuthenticatedFleetActivityRoute
+  '/_authenticated/fleet/deployments': typeof AuthenticatedFleetDeploymentsRoute
+  '/_authenticated/fleet/nodes': typeof AuthenticatedFleetNodesRoute
+  '/_authenticated/fleet/policy-settings': typeof AuthenticatedFleetPolicySettingsRoute
+  '/_authenticated/fleet/sites': typeof AuthenticatedFleetSitesRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -170,6 +238,7 @@ export interface FileRouteTypes {
     | '/login'
     | '/setup'
     | '/clients'
+    | '/diagnostics'
     | '/groups'
     | '/network'
     | '/queries'
@@ -181,11 +250,18 @@ export interface FileRouteTypes {
     | '/dns/upstreams'
     | '/filtering/lists'
     | '/filtering/rules'
+    | '/filtering/services'
+    | '/fleet/activity'
+    | '/fleet/deployments'
+    | '/fleet/nodes'
+    | '/fleet/policy-settings'
+    | '/fleet/sites'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/login'
     | '/setup'
     | '/clients'
+    | '/diagnostics'
     | '/groups'
     | '/network'
     | '/queries'
@@ -198,12 +274,19 @@ export interface FileRouteTypes {
     | '/dns/upstreams'
     | '/filtering/lists'
     | '/filtering/rules'
+    | '/filtering/services'
+    | '/fleet/activity'
+    | '/fleet/deployments'
+    | '/fleet/nodes'
+    | '/fleet/policy-settings'
+    | '/fleet/sites'
   id:
     | '__root__'
     | '/_authenticated'
     | '/login'
     | '/setup'
     | '/_authenticated/clients'
+    | '/_authenticated/diagnostics'
     | '/_authenticated/groups'
     | '/_authenticated/network'
     | '/_authenticated/queries'
@@ -216,6 +299,12 @@ export interface FileRouteTypes {
     | '/_authenticated/dns/upstreams'
     | '/_authenticated/filtering/lists'
     | '/_authenticated/filtering/rules'
+    | '/_authenticated/filtering/services'
+    | '/_authenticated/fleet/activity'
+    | '/_authenticated/fleet/deployments'
+    | '/_authenticated/fleet/nodes'
+    | '/_authenticated/fleet/policy-settings'
+    | '/_authenticated/fleet/sites'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -259,6 +348,13 @@ declare module '@tanstack/react-router' {
       path: '/clients'
       fullPath: '/clients'
       preLoaderRoute: typeof AuthenticatedClientsRouteImport
+      parentRoute: typeof AuthenticatedRoute
+    }
+    '/_authenticated/diagnostics': {
+      id: '/_authenticated/diagnostics'
+      path: '/diagnostics'
+      fullPath: '/diagnostics'
+      preLoaderRoute: typeof AuthenticatedDiagnosticsRouteImport
       parentRoute: typeof AuthenticatedRoute
     }
     '/_authenticated/groups': {
@@ -338,11 +434,54 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedFilteringRulesRouteImport
       parentRoute: typeof AuthenticatedRoute
     }
+    '/_authenticated/filtering/services': {
+      id: '/_authenticated/filtering/services'
+      path: '/filtering/services'
+      fullPath: '/filtering/services'
+      preLoaderRoute: typeof AuthenticatedFilteringServicesRouteImport
+      parentRoute: typeof AuthenticatedRoute
+    }
+    '/_authenticated/fleet/activity': {
+      id: '/_authenticated/fleet/activity'
+      path: '/fleet/activity'
+      fullPath: '/fleet/activity'
+      preLoaderRoute: typeof AuthenticatedFleetActivityRouteImport
+      parentRoute: typeof AuthenticatedRoute
+    }
+    '/_authenticated/fleet/deployments': {
+      id: '/_authenticated/fleet/deployments'
+      path: '/fleet/deployments'
+      fullPath: '/fleet/deployments'
+      preLoaderRoute: typeof AuthenticatedFleetDeploymentsRouteImport
+      parentRoute: typeof AuthenticatedRoute
+    }
+    '/_authenticated/fleet/nodes': {
+      id: '/_authenticated/fleet/nodes'
+      path: '/fleet/nodes'
+      fullPath: '/fleet/nodes'
+      preLoaderRoute: typeof AuthenticatedFleetNodesRouteImport
+      parentRoute: typeof AuthenticatedRoute
+    }
+    '/_authenticated/fleet/policy-settings': {
+      id: '/_authenticated/fleet/policy-settings'
+      path: '/fleet/policy-settings'
+      fullPath: '/fleet/policy-settings'
+      preLoaderRoute: typeof AuthenticatedFleetPolicySettingsRouteImport
+      parentRoute: typeof AuthenticatedRoute
+    }
+    '/_authenticated/fleet/sites': {
+      id: '/_authenticated/fleet/sites'
+      path: '/fleet/sites'
+      fullPath: '/fleet/sites'
+      preLoaderRoute: typeof AuthenticatedFleetSitesRouteImport
+      parentRoute: typeof AuthenticatedRoute
+    }
   }
 }
 
 interface AuthenticatedRouteChildren {
   AuthenticatedClientsRoute: typeof AuthenticatedClientsRoute
+  AuthenticatedDiagnosticsRoute: typeof AuthenticatedDiagnosticsRoute
   AuthenticatedGroupsRoute: typeof AuthenticatedGroupsRoute
   AuthenticatedNetworkRoute: typeof AuthenticatedNetworkRoute
   AuthenticatedQueriesRoute: typeof AuthenticatedQueriesRoute
@@ -355,10 +494,17 @@ interface AuthenticatedRouteChildren {
   AuthenticatedDnsUpstreamsRoute: typeof AuthenticatedDnsUpstreamsRoute
   AuthenticatedFilteringListsRoute: typeof AuthenticatedFilteringListsRoute
   AuthenticatedFilteringRulesRoute: typeof AuthenticatedFilteringRulesRoute
+  AuthenticatedFilteringServicesRoute: typeof AuthenticatedFilteringServicesRoute
+  AuthenticatedFleetActivityRoute: typeof AuthenticatedFleetActivityRoute
+  AuthenticatedFleetDeploymentsRoute: typeof AuthenticatedFleetDeploymentsRoute
+  AuthenticatedFleetNodesRoute: typeof AuthenticatedFleetNodesRoute
+  AuthenticatedFleetPolicySettingsRoute: typeof AuthenticatedFleetPolicySettingsRoute
+  AuthenticatedFleetSitesRoute: typeof AuthenticatedFleetSitesRoute
 }
 
 const AuthenticatedRouteChildren: AuthenticatedRouteChildren = {
   AuthenticatedClientsRoute: AuthenticatedClientsRoute,
+  AuthenticatedDiagnosticsRoute: AuthenticatedDiagnosticsRoute,
   AuthenticatedGroupsRoute: AuthenticatedGroupsRoute,
   AuthenticatedNetworkRoute: AuthenticatedNetworkRoute,
   AuthenticatedQueriesRoute: AuthenticatedQueriesRoute,
@@ -371,6 +517,12 @@ const AuthenticatedRouteChildren: AuthenticatedRouteChildren = {
   AuthenticatedDnsUpstreamsRoute: AuthenticatedDnsUpstreamsRoute,
   AuthenticatedFilteringListsRoute: AuthenticatedFilteringListsRoute,
   AuthenticatedFilteringRulesRoute: AuthenticatedFilteringRulesRoute,
+  AuthenticatedFilteringServicesRoute: AuthenticatedFilteringServicesRoute,
+  AuthenticatedFleetActivityRoute: AuthenticatedFleetActivityRoute,
+  AuthenticatedFleetDeploymentsRoute: AuthenticatedFleetDeploymentsRoute,
+  AuthenticatedFleetNodesRoute: AuthenticatedFleetNodesRoute,
+  AuthenticatedFleetPolicySettingsRoute: AuthenticatedFleetPolicySettingsRoute,
+  AuthenticatedFleetSitesRoute: AuthenticatedFleetSitesRoute,
 }
 
 const AuthenticatedRouteWithChildren = AuthenticatedRoute._addFileChildren(

@@ -395,6 +395,8 @@ Note: query log columns may be NULL depending on privacy policy; schema alone do
 
 ### 4.4 Controller PostgreSQL DDL (reference subset)
 
+The implementation uses SQLite instead, as ADR-015 explains. This reference is kept for the entities it describes.
+
 ```sql
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 CREATE TABLE organizations (
@@ -862,7 +864,7 @@ Values are illustrative, **not a promise that each TOML key is already implement
 
 ### 7.3 Metrics and logs
 
-Prometheus-style series: `dns_queries_total{outcome,qtype}`, `dns_request_duration_seconds_bucket`, `dns_upstream_duration_seconds_bucket{pool}`, `dns_upstream_failures_total`, `dns_cache_hits_total`, `dns_policy_revision_info`, `dns_policy_compile_seconds`, `dns_telemetry_dropped_total`, `dns_query_history_retained_seconds`, `dns_runtime_inflight`, `node_controller_connected`, `node_controller_generation_lag`, `node_list_artifact_age_seconds`. Avoid domain/client labels in general metrics to prevent unbounded cardinality and leakage. Structured logs include request ID, component, severity, node/site ID, error code; no full DNS query logs at INFO by default.
+All metrics live in the dashboard, backed by each node's own API and, for a fleet, by what nodes report to the controller. There is deliberately no Prometheus or other scrape endpoint. Dashboards show query counts by result, response time, per-upstream response time and failures, cache hits, expired answers, early refreshes, policy revision and telemetry drops. WARN and INFO logs carry no query names by default.
 
 ### 7.4 Backup/restore
 
@@ -1021,7 +1023,7 @@ These items are not yet resolved in this specification.
 **Standalone first run**
 
 - Load renewed TLS certificates without a restart, and renew the self-signed certificate. See `docs/operations/install.md` for the current options.
-- Add DNS rebinding/Host validation and login throttling to the threat model (both are implemented), and CSV injection through query names when query export is built.
+- Add DNS rebinding/Host validation and login throttling to the threat model (both are implemented). Query export marks spreadsheet formulas as text, so query names can't run as CSV injection.
 
 **Runtime and DNS behavior**
 

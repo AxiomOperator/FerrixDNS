@@ -1,0 +1,40 @@
+# A DNS node with no dashboard, managed by a central controller. Create a token on the controller,
+# under Nodes, then run:
+#
+#   sudo FERRIXDNS_ENROLL_TOKEN=... scripts/docker-deploy.sh --node-only --address 10.0.0.5
+#
+# Host networking is what lets the node see each device's real address.
+services:
+  ferrixdns:
+    image: ferrixdns
+    container_name: ferrixdns
+    build:
+      context: ../..
+      dockerfile: packaging/docker/Dockerfile
+    restart: unless-stopped
+    network_mode: host
+    read_only: true
+    # Don't add no-new-privileges. The binary gets NET_BIND_SERVICE from its file capability, because
+    # it isn't root, and that option makes the kernel ignore file capabilities.
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    volumes:
+      - ferrixdns-data:/data
+    healthcheck:
+      test: ["CMD", "/usr/bin/ferrixdns", "health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+    environment:
+      FERRIXDNS_NO_WEB: "true"
+      FERRIXDNS_LISTEN: "${FERRIXDNS_ADDRESS:-192.168.1.10}:${FERRIXDNS_DNS_PORT:-53}"
+      FERRIXDNS_HEALTH_ADDRESS: "${FERRIXDNS_ADDRESS:-192.168.1.10}:${FERRIXDNS_DNS_PORT:-53}"
+      # Upstreams and listening addresses stay with each node. Policy comes from the controller.
+      FERRIXDNS_UPSTREAM: "${FERRIXDNS_UPSTREAM:-tls://cloudflare-dns.com@1.1.1.1,tls://dns.quad9.net@9.9.9.9}"
+      # Only used to join. It works once, so it's harmless afterwards. Empty means it isn't passed on.
+      FERRIXDNS_ENROLL_TOKEN:
+      FERRIXDNS_NODE_NAME:
+      FERRIXDNS_ALLOW:
+
+volumes:
+  ferrixdns-data:

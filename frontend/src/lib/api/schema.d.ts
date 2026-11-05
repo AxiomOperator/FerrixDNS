@@ -160,6 +160,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/blocked-services": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Every service that can be blocked in one step, and whether it is. */
+        get: operations["list_blocked_services"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/blocked-services/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Blocks or unblocks a service, active as soon as this returns. */
+        put: operations["set_blocked_service"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/blocking": {
         parameters: {
             query?: never;
@@ -275,6 +309,26 @@ export interface paths {
         get: operations["list_revisions"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/diagnostics/lookup": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Explains how this node would answer a query right now. Nothing is changed, but the upstream
+         *     servers are asked.
+         */
+        post: operations["diagnose"];
         delete?: never;
         options?: never;
         head?: never;
@@ -438,6 +492,224 @@ export interface paths {
         options?: never;
         head?: never;
         patch?: never;
+        trace?: never;
+    };
+    "/api/v1/fleet/controller": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** What this controller is, and what nodes check it by. */
+        get: operations["controller_info"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/fleet/deployments": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Recent deployments, newest first, and how far each node has got. */
+        get: operations["list_deployments"];
+        put?: never;
+        /** Sends a site's current policy to its nodes. */
+        post: operations["create_deployment"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/fleet/deployments/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** One deployment. */
+        get: operations["get_deployment"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/fleet/deployments/{id}/promote": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Lets a canary's deployment go to every node, without waiting for the canary to report back. */
+        post: operations["promote_deployment"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/fleet/deployments/{id}/rollback": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Sends a site back to what a deployment contained, as a new, higher generation.
+         * @description The policy being edited isn't changed, so it then shows as having undeployed changes.
+         */
+        post: operations["rollback_deployment"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/fleet/enrollment-tokens": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Tokens that haven't been used yet. */
+        get: operations["list_tokens"];
+        put?: never;
+        /** Creates a token that lets one new node join a site. It works once, and is only shown now. */
+        post: operations["create_token"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/fleet/enrollment-tokens/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Cancels a token that hasn't been used. */
+        delete: operations["delete_token"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/fleet/nodes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** All nodes, and what they last reported. */
+        get: operations["list_nodes"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/fleet/nodes/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Removes a node. It stops being able to reach this controller, and keeps serving DNS with the
+         *     last policy it applied.
+         */
+        delete: operations["delete_node"];
+        options?: never;
+        head?: never;
+        /** Renames a node. */
+        patch: operations["update_node"];
+        trace?: never;
+    };
+    "/api/v1/fleet/overview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The fleet's health and query counts. All of it comes from what nodes report, and names and
+         *     client addresses stay on each node.
+         */
+        get: operations["fleet_overview"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/fleet/sites": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** All sites. */
+        get: operations["list_sites"];
+        put?: never;
+        /** Adds a site, optionally starting from a copy of another site's policy. */
+        post: operations["create_site"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/fleet/sites/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Removes a site and its policy. A site with nodes can't be removed. */
+        delete: operations["delete_site"];
+        options?: never;
+        head?: never;
+        /** Renames a site, or changes how it deploys list updates. */
+        patch: operations["update_site"];
         trace?: never;
     };
     "/api/v1/groups": {
@@ -684,6 +956,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/queries/export": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Downloads the query log, with the same filters as the Query Explorer, newest first. An export
+         *     stops at 1,000,000 queries, so narrow the filters to get the rest.
+         */
+        get: operations["export_queries"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/queries/stream": {
         parameters: {
             query?: never;
@@ -808,11 +1100,22 @@ export interface components {
             target: string;
         };
         AuthStatus: {
+            role: components["schemas"]["ServerRole"];
             /** @description True until the first administrator has been created. */
             setup_required: boolean;
         };
         /** @enum {string} */
         BlockResponseDto: "nxdomain" | "zero_address";
+        /** @description A service that can be blocked in one step. */
+        BlockedServiceDto: {
+            blocked: boolean;
+            category: string;
+            domains: string[];
+            /** @description Who it's blocked for. Empty means everyone. */
+            groups: string[];
+            id: string;
+            name: string;
+        };
         /** @description Whether blocking is paused. */
         BlockingDto: {
             paused: boolean;
@@ -848,6 +1151,16 @@ export interface components {
             max_bytes: number;
             /** Format: int64 */
             misses: number;
+            /**
+             * Format: int64
+             * @description Popular answers refreshed before they expired.
+             */
+            prefetches: number;
+            /**
+             * Format: int64
+             * @description Expired answers given out because upstreams couldn't answer.
+             */
+            stale_served: number;
         };
         ChangePasswordRequest: {
             current_password: string;
@@ -869,6 +1182,15 @@ export interface components {
              */
             query_count: number;
         };
+        /** @description The controller itself. */
+        ControllerInfo: {
+            /** @description The fingerprint of the key that signs bundles. */
+            signing_key: string;
+            /** @description The SHA-256 of a self-signed certificate that nodes pin. */
+            tls_pin?: string | null;
+            url: string;
+            version: string;
+        };
         CountDto: {
             /** Format: int64 */
             count: number;
@@ -880,6 +1202,20 @@ export interface components {
             hostnames?: string[];
             macs?: string[];
             name: string;
+        };
+        CreateDeployment: {
+            reason?: string | null;
+            site_id: string;
+            /** @description `all` sends it to every node at once. `canary` tries it on one node first. */
+            strategy?: string | null;
+        };
+        CreateEnrollmentToken: {
+            site_id: string;
+            /**
+             * Format: int32
+             * @description How long it can be used, from 1 minute to 7 days. An hour if not given.
+             */
+            ttl_minutes?: number | null;
         };
         CreateForwardZone: {
             load_balance?: boolean;
@@ -919,6 +1255,11 @@ export interface components {
             reason?: string | null;
             scope: components["schemas"]["ScopeDto"];
         };
+        CreateSite: {
+            /** @description Start with a copy of this site's policy. */
+            copy_from?: string | null;
+            name: string;
+        };
         DecisionDto: {
             action: components["schemas"]["QueryAction"];
             list_id?: string | null;
@@ -929,6 +1270,112 @@ export interface components {
             rule_pattern?: string | null;
             /** @description `rule`, `subscribed_list` or `none`. */
             source: string;
+        };
+        /** @description A rollout of one bundle to one site. */
+        DeploymentDto: {
+            created_at: string;
+            created_by: string;
+            /** Format: int64 */
+            generation: number;
+            id: string;
+            /** @description `policy`, `list_refresh` or `rollback`. */
+            kind: string;
+            nodes: components["schemas"]["DeploymentNodeDto"][];
+            policy_sha256: string;
+            reason: string;
+            rollback_of?: string | null;
+            site_id: string;
+            site_name: string;
+            /** @description `canary`, `rolling_out`, `succeeded`, `partially_failed`, `failed` or `superseded`. */
+            status: string;
+            /** @description `all` or `canary`. */
+            strategy: string;
+        };
+        /** @description How far one node has got with a deployment. */
+        DeploymentNodeDto: {
+            detail?: string | null;
+            is_canary: boolean;
+            node_id: string;
+            node_name: string;
+            online: boolean;
+            /** @description `pending`, `downloading`, `staged`, `activating`, `healthy`, `failed` or `reverted`. */
+            state: string;
+            updated_at?: string | null;
+        };
+        /** @description What to look into. */
+        DiagnoseRequest: {
+            /** @description The device asking. Without one, only rules for everyone apply. */
+            client_ip?: string | null;
+            name: string;
+            /** @description The record type, such as `A` or `AAAA`. `A` if not given. */
+            type?: string | null;
+        };
+        /** @description What one upstream server said when asked directly. */
+        DiagnosticProbe: {
+            answers: string[];
+            error?: string | null;
+            /** Format: double */
+            latency_ms: number;
+            ok: boolean;
+            rcode?: string | null;
+            server: string;
+        };
+        /** @description How this node would answer a query right now, and why. */
+        DiagnosticReport: {
+            answers: string[];
+            client_id?: string | null;
+            client_ip?: string | null;
+            name: string;
+            /** @description The most recent queries in the log with this name in them. */
+            recent: components["schemas"]["QueryEventDto"][];
+            /** @description `refused`, `blocked`, `local`, `cached`, `forwarded`, `stale` or `failed`. */
+            result: string;
+            revision: string;
+            steps: components["schemas"]["DiagnosticStep"][];
+            /** @description The conclusion in a sentence. */
+            summary: string;
+            type: string;
+            upstreams: components["schemas"]["DiagnosticProbe"][];
+        };
+        /**
+         * @description How one step of answering went.
+         * @enum {string}
+         */
+        DiagnosticStatus: "ok" | "info" | "warning" | "stopped";
+        /** @description One step of answering a query. */
+        DiagnosticStep: {
+            detail: string;
+            status: components["schemas"]["DiagnosticStatus"];
+            title: string;
+        };
+        /** @description A token that lets one new node join. It's only shown once. */
+        EnrollmentTokenCreated: {
+            controller_url: string;
+            expires_at: string;
+            id: string;
+            token: string;
+        };
+        /** @description A token that hasn't been used yet. Its secret can't be shown again. */
+        EnrollmentTokenDto: {
+            created_at: string;
+            created_by: string;
+            expires_at: string;
+            id: string;
+            site_id: string;
+            site_name: string;
+        };
+        /** @description A single resource. */
+        Envelope_BlockedServiceDto: {
+            /** @description A service that can be blocked in one step. */
+            data: {
+                blocked: boolean;
+                category: string;
+                domains: string[];
+                /** @description Who it's blocked for. Empty means everyone. */
+                groups: string[];
+                id: string;
+                name: string;
+            };
         };
         /** @description A single resource. */
         Envelope_BlockingDto: {
@@ -956,6 +1403,16 @@ export interface components {
                 max_bytes: number;
                 /** Format: int64 */
                 misses: number;
+                /**
+                 * Format: int64
+                 * @description Popular answers refreshed before they expired.
+                 */
+                prefetches: number;
+                /**
+                 * Format: int64
+                 * @description Expired answers given out because upstreams couldn't answer.
+                 */
+                stale_served: number;
             };
         };
         /** @description A single resource. */
@@ -975,6 +1432,99 @@ export interface components {
                  * @description Queries in the last 7 days.
                  */
                 query_count: number;
+            };
+        };
+        /** @description A single resource. */
+        Envelope_ControllerInfo: {
+            /** @description The controller itself. */
+            data: {
+                /** @description The fingerprint of the key that signs bundles. */
+                signing_key: string;
+                /** @description The SHA-256 of a self-signed certificate that nodes pin. */
+                tls_pin?: string | null;
+                url: string;
+                version: string;
+            };
+        };
+        /** @description A single resource. */
+        Envelope_DeploymentDto: {
+            /** @description A rollout of one bundle to one site. */
+            data: {
+                created_at: string;
+                created_by: string;
+                /** Format: int64 */
+                generation: number;
+                id: string;
+                /** @description `policy`, `list_refresh` or `rollback`. */
+                kind: string;
+                nodes: components["schemas"]["DeploymentNodeDto"][];
+                policy_sha256: string;
+                reason: string;
+                rollback_of?: string | null;
+                site_id: string;
+                site_name: string;
+                /** @description `canary`, `rolling_out`, `succeeded`, `partially_failed`, `failed` or `superseded`. */
+                status: string;
+                /** @description `all` or `canary`. */
+                strategy: string;
+            };
+        };
+        /** @description A single resource. */
+        Envelope_DiagnosticReport: {
+            /** @description How this node would answer a query right now, and why. */
+            data: {
+                answers: string[];
+                client_id?: string | null;
+                client_ip?: string | null;
+                name: string;
+                /** @description The most recent queries in the log with this name in them. */
+                recent: components["schemas"]["QueryEventDto"][];
+                /** @description `refused`, `blocked`, `local`, `cached`, `forwarded`, `stale` or `failed`. */
+                result: string;
+                revision: string;
+                steps: components["schemas"]["DiagnosticStep"][];
+                /** @description The conclusion in a sentence. */
+                summary: string;
+                type: string;
+                upstreams: components["schemas"]["DiagnosticProbe"][];
+            };
+        };
+        /** @description A single resource. */
+        Envelope_EnrollmentTokenCreated: {
+            /** @description A token that lets one new node join. It's only shown once. */
+            data: {
+                controller_url: string;
+                expires_at: string;
+                id: string;
+                token: string;
+            };
+        };
+        /** @description A single resource. */
+        Envelope_FleetOverviewDto: {
+            /** @description The whole fleet at a glance. Query names and client addresses stay on each node. */
+            data: {
+                /** Format: int64 */
+                answered: number;
+                /** Format: int64 */
+                average_latency_us: number;
+                /** Format: int64 */
+                blocked: number;
+                /** Format: int64 */
+                bucket_seconds: number;
+                buckets: components["schemas"]["FleetBucketDto"][];
+                by_node: components["schemas"]["FleetNodeCount"][];
+                /** Format: int64 */
+                cached: number;
+                /** Format: int64 */
+                failed: number;
+                node_count: number;
+                nodes_online: number;
+                site_count: number;
+                sites_with_undeployed_changes: number;
+                /** Format: int64 */
+                stale: number;
+                /** Format: int64 */
+                total: number;
             };
         };
         /** @description A single resource. */
@@ -1159,8 +1709,11 @@ export interface components {
                 /** @description Send this in the `X-CSRF-Token` header on requests that change anything. */
                 csrf_token: string;
                 expires_at: string;
-                /** @description True when the policy comes from a file, which disables editing. */
+                /** @description True when the policy comes from a central controller. */
+                policy_managed: boolean;
+                /** @description True when the policy comes from a file or a controller, which disables editing. */
                 policy_read_only: boolean;
+                role: components["schemas"]["ServerRole"];
                 username: string;
             };
         };
@@ -1183,6 +1736,26 @@ export interface components {
                  *     limit off.
                  */
                 rate_limit_queries_per_minute: number;
+            };
+        };
+        /** @description A single resource. */
+        Envelope_SiteDto: {
+            /** @description A group of nodes that enforce the same policy. */
+            data: {
+                /** @description Deploys changed list downloads by itself, without waiting for someone to press Deploy. */
+                auto_deploy_lists: boolean;
+                created_at: string;
+                /** Format: int64 */
+                deployed_generation?: number | null;
+                /** @description The policy being edited has changes that haven't been deployed. */
+                has_undeployed_changes: boolean;
+                id: string;
+                list_count: number;
+                name: string;
+                node_count: number;
+                nodes_online: number;
+                policy_revision: string;
+                rule_count: number;
             };
         };
         /** @description A single resource. */
@@ -1261,6 +1834,18 @@ export interface components {
             }[];
         };
         /** @description A single resource. */
+        Envelope_Vec_BlockedServiceDto: {
+            data: {
+                blocked: boolean;
+                category: string;
+                domains: string[];
+                /** @description Who it's blocked for. Empty means everyone. */
+                groups: string[];
+                id: string;
+                name: string;
+            }[];
+        };
+        /** @description A single resource. */
         Envelope_Vec_ClientDto: {
             data: {
                 addresses: string[];
@@ -1277,6 +1862,39 @@ export interface components {
                  * @description Queries in the last 7 days.
                  */
                 query_count: number;
+            }[];
+        };
+        /** @description A single resource. */
+        Envelope_Vec_DeploymentDto: {
+            data: {
+                created_at: string;
+                created_by: string;
+                /** Format: int64 */
+                generation: number;
+                id: string;
+                /** @description `policy`, `list_refresh` or `rollback`. */
+                kind: string;
+                nodes: components["schemas"]["DeploymentNodeDto"][];
+                policy_sha256: string;
+                reason: string;
+                rollback_of?: string | null;
+                site_id: string;
+                site_name: string;
+                /** @description `canary`, `rolling_out`, `succeeded`, `partially_failed`, `failed` or `superseded`. */
+                status: string;
+                /** @description `all` or `canary`. */
+                strategy: string;
+            }[];
+        };
+        /** @description A single resource. */
+        Envelope_Vec_EnrollmentTokenDto: {
+            data: {
+                created_at: string;
+                created_by: string;
+                expires_at: string;
+                id: string;
+                site_id: string;
+                site_name: string;
             }[];
         };
         /** @description A single resource. */
@@ -1370,6 +1988,49 @@ export interface components {
             }[];
         };
         /** @description A single resource. */
+        Envelope_Vec_NodeDto: {
+            data: {
+                /** Format: int64 */
+                applied_generation: number;
+                /** Format: int64 */
+                blocked_last_hour: number;
+                blocking_paused: boolean;
+                /** Format: int64 */
+                cache_entries: number;
+                /** Format: int64 */
+                cache_hits: number;
+                /** Format: int64 */
+                cache_misses: number;
+                /** Format: int64 */
+                cache_prefetches: number;
+                /** Format: int64 */
+                cache_stale_served: number;
+                /**
+                 * Format: int64
+                 * @description The generation it should reach. Nothing means no deployment applies to it yet.
+                 */
+                desired_generation?: number | null;
+                enrolled_at: string;
+                id: string;
+                last_seen?: string | null;
+                listeners: string[];
+                name: string;
+                online: boolean;
+                policy_revision: string;
+                /**
+                 * Format: int64
+                 * @description Queries in the last hour.
+                 */
+                queries_last_hour: number;
+                site_id: string;
+                site_name: string;
+                upstreams: components["schemas"]["NodeUpstreamDto"][];
+                /** Format: int64 */
+                uptime_seconds: number;
+                version: string;
+            }[];
+        };
+        /** @description A single resource. */
         Envelope_Vec_RevisionDto: {
             data: {
                 active: boolean;
@@ -1401,10 +2062,33 @@ export interface components {
             }[];
         };
         /** @description A single resource. */
+        Envelope_Vec_SiteDto: {
+            data: {
+                /** @description Deploys changed list downloads by itself, without waiting for someone to press Deploy. */
+                auto_deploy_lists: boolean;
+                created_at: string;
+                /** Format: int64 */
+                deployed_generation?: number | null;
+                /** @description The policy being edited has changes that haven't been deployed. */
+                has_undeployed_changes: boolean;
+                id: string;
+                list_count: number;
+                name: string;
+                node_count: number;
+                nodes_online: number;
+                policy_revision: string;
+                rule_count: number;
+            }[];
+        };
+        /** @description A single resource. */
         Envelope_Vec_UpstreamDto: {
             data: {
                 /** Format: int64 */
                 failures: number;
+                /** @description The forward zones that use this server, or nothing for a default upstream. */
+                forward_zones?: string | null;
+                /** @description The minutes with activity in the last hour, oldest first. */
+                history: components["schemas"]["UpstreamMinuteDto"][];
                 /** Format: int64 */
                 last_latency_us: number;
                 /** Format: int64 */
@@ -1421,6 +2105,53 @@ export interface components {
         /** @description The error body shared by every endpoint. */
         ErrorEnvelope: {
             error: components["schemas"]["ErrorBody"];
+        };
+        /** @description Fleet query counts for a stretch of time. */
+        FleetBucketDto: {
+            /** Format: int64 */
+            answered: number;
+            /** Format: int64 */
+            blocked: number;
+            /** Format: int64 */
+            failed: number;
+            start: string;
+        };
+        /** @description One node's share of the fleet's queries. */
+        FleetNodeCount: {
+            /** Format: int64 */
+            average_latency_us: number;
+            /** Format: int64 */
+            blocked: number;
+            node_id: string;
+            node_name: string;
+            site_name: string;
+            /** Format: int64 */
+            total: number;
+        };
+        /** @description The whole fleet at a glance. Query names and client addresses stay on each node. */
+        FleetOverviewDto: {
+            /** Format: int64 */
+            answered: number;
+            /** Format: int64 */
+            average_latency_us: number;
+            /** Format: int64 */
+            blocked: number;
+            /** Format: int64 */
+            bucket_seconds: number;
+            buckets: components["schemas"]["FleetBucketDto"][];
+            by_node: components["schemas"]["FleetNodeCount"][];
+            /** Format: int64 */
+            cached: number;
+            /** Format: int64 */
+            failed: number;
+            node_count: number;
+            nodes_online: number;
+            site_count: number;
+            sites_with_undeployed_changes: number;
+            /** Format: int64 */
+            stale: number;
+            /** Format: int64 */
+            total: number;
         };
         /** @description Names that go to specific servers instead of the default upstreams. */
         ForwardZoneDto: {
@@ -1519,6 +2250,47 @@ export interface components {
             /** @description Whether it's over its query limit right now. */
             rate_limited: boolean;
         };
+        /** @description A DNS node managed by this controller. */
+        NodeDto: {
+            /** Format: int64 */
+            applied_generation: number;
+            /** Format: int64 */
+            blocked_last_hour: number;
+            blocking_paused: boolean;
+            /** Format: int64 */
+            cache_entries: number;
+            /** Format: int64 */
+            cache_hits: number;
+            /** Format: int64 */
+            cache_misses: number;
+            /** Format: int64 */
+            cache_prefetches: number;
+            /** Format: int64 */
+            cache_stale_served: number;
+            /**
+             * Format: int64
+             * @description The generation it should reach. Nothing means no deployment applies to it yet.
+             */
+            desired_generation?: number | null;
+            enrolled_at: string;
+            id: string;
+            last_seen?: string | null;
+            listeners: string[];
+            name: string;
+            online: boolean;
+            policy_revision: string;
+            /**
+             * Format: int64
+             * @description Queries in the last hour.
+             */
+            queries_last_hour: number;
+            site_id: string;
+            site_name: string;
+            upstreams: components["schemas"]["NodeUpstreamDto"][];
+            /** Format: int64 */
+            uptime_seconds: number;
+            version: string;
+        };
         /** @description Every setting of the node that can be changed from the dashboard. */
         NodeSettings: {
             allow: string[];
@@ -1531,6 +2303,13 @@ export interface components {
             cache_mib: number;
             /** Format: int64 */
             cache_negative_ttl: number;
+            /** @description Refreshes popular answers shortly before they expire. */
+            cache_prefetch: boolean;
+            /**
+             * Format: int64
+             * @description How long expired answers are kept, to use when upstreams can't answer, in seconds. 0 is off.
+             */
+            cache_stale_seconds: number;
             dnssec_validate: boolean;
             listen: string[];
             /** @description What the node logs, in the format of `RUST_LOG`. */
@@ -1566,6 +2345,16 @@ export interface components {
             settings: components["schemas"]["NodeSettings"];
             /** @description The values from the command line and environment, without any changes from here. */
             startup: components["schemas"]["NodeSettings"];
+        };
+        /** @description One upstream server, as a node last reported it. */
+        NodeUpstreamDto: {
+            /** Format: int64 */
+            failures: number;
+            /** Format: int64 */
+            last_latency_us: number;
+            /** Format: int64 */
+            responses: number;
+            server: string;
         };
         /** @description The state of this node's NTP server. */
         NtpStatusDto: {
@@ -1627,7 +2416,7 @@ export interface components {
             seconds_left: number;
         };
         /** @enum {string} */
-        QueryAction: "forwarded" | "cached" | "local" | "blocked" | "rejected" | "failed" | "rate_limited";
+        QueryAction: "forwarded" | "cached" | "stale" | "local" | "blocked" | "rejected" | "failed" | "rate_limited";
         QueryClientDto: {
             address?: string | null;
             id?: string | null;
@@ -1681,6 +2470,9 @@ export interface components {
             revision: string;
             rule_count: number;
         };
+        RollbackRequest: {
+            reason?: string | null;
+        };
         RuleDto: {
             action: components["schemas"]["ActionDto"];
             created_at?: string | null;
@@ -1712,13 +2504,27 @@ export interface components {
         };
         /** @enum {string} */
         ScopeKind: "global" | "site" | "group" | "client";
+        /**
+         * @description What this server is.
+         * @enum {string}
+         */
+        ServerRole: "node" | "controller";
         SessionInfo: {
             /** @description Send this in the `X-CSRF-Token` header on requests that change anything. */
             csrf_token: string;
             expires_at: string;
-            /** @description True when the policy comes from a file, which disables editing. */
+            /** @description True when the policy comes from a central controller. */
+            policy_managed: boolean;
+            /** @description True when the policy comes from a file or a controller, which disables editing. */
             policy_read_only: boolean;
+            role: components["schemas"]["ServerRole"];
             username: string;
+        };
+        /** @description Whether a service is blocked, and for whom. */
+        SetBlockedService: {
+            blocked: boolean;
+            /** @description Who to block it for. Empty means everyone. */
+            groups?: string[];
         };
         SettingsDto: {
             block_response: components["schemas"]["BlockResponseDto"];
@@ -1743,6 +2549,23 @@ export interface components {
             /** @description The one-time token from the node's log. */
             token: string;
             username: string;
+        };
+        /** @description A group of nodes that enforce the same policy. */
+        SiteDto: {
+            /** @description Deploys changed list downloads by itself, without waiting for someone to press Deploy. */
+            auto_deploy_lists: boolean;
+            created_at: string;
+            /** Format: int64 */
+            deployed_generation?: number | null;
+            /** @description The policy being edited has changes that haven't been deployed. */
+            has_undeployed_changes: boolean;
+            id: string;
+            list_count: number;
+            name: string;
+            node_count: number;
+            nodes_online: number;
+            policy_revision: string;
+            rule_count: number;
         };
         SystemStatus: {
             client_count: number;
@@ -1826,6 +2649,9 @@ export interface components {
             type?: components["schemas"]["LocalRecordTypeDto"] | null;
             value?: string | null;
         };
+        UpdateNode: {
+            name: string;
+        };
         /** @description Changes to a rule. Absent fields stay as they are. An empty `expires_at` or `reason` clears it. */
         UpdateRule: {
             action?: components["schemas"]["ActionDto"] | null;
@@ -1837,14 +2663,32 @@ export interface components {
             reason?: string | null;
             scope?: components["schemas"]["ScopeDto"] | null;
         };
+        UpdateSite: {
+            auto_deploy_lists?: boolean | null;
+            name?: string | null;
+        };
         UpstreamDto: {
             /** Format: int64 */
             failures: number;
+            /** @description The forward zones that use this server, or nothing for a default upstream. */
+            forward_zones?: string | null;
+            /** @description The minutes with activity in the last hour, oldest first. */
+            history: components["schemas"]["UpstreamMinuteDto"][];
             /** Format: int64 */
             last_latency_us: number;
             /** Format: int64 */
             responses: number;
             server: string;
+        };
+        /** @description One minute of an upstream server's activity. */
+        UpstreamMinuteDto: {
+            /** Format: int64 */
+            average_latency_us: number;
+            /** Format: int64 */
+            failures: number;
+            /** Format: int64 */
+            responses: number;
+            start: string;
         };
         UpstreamTestResult: {
             /** Format: int64 */
@@ -2158,6 +3002,90 @@ export interface operations {
             };
         };
     };
+    list_blocked_services: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope_Vec_BlockedServiceDto"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    set_blocked_service: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SetBlockedService"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope_BlockedServiceDto"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
     get_blocking: {
         parameters: {
             query?: never;
@@ -2440,6 +3368,45 @@ export interface operations {
                 };
             };
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    diagnose: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DiagnoseRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope_DiagnosticReport"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -2915,6 +3882,654 @@ export interface operations {
                 };
             };
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    controller_info: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope_ControllerInfo"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    list_deployments: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                site_id: string | null;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope_Vec_DeploymentDto"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    create_deployment: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateDeployment"];
+            };
+        };
+        responses: {
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope_DeploymentDto"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    get_deployment: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope_DeploymentDto"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    promote_deployment: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope_DeploymentDto"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    rollback_deployment: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RollbackRequest"];
+            };
+        };
+        responses: {
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope_DeploymentDto"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    list_tokens: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope_Vec_EnrollmentTokenDto"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    create_token: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateEnrollmentToken"];
+            };
+        };
+        responses: {
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope_EnrollmentTokenCreated"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    delete_token: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    list_nodes: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope_Vec_NodeDto"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    delete_node: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    update_node: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateNode"];
+            };
+        };
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    fleet_overview: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description How much history to include, up to 2,160 hours. An hour if not given. */
+                hours: number | null;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope_FleetOverviewDto"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    list_sites: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope_Vec_SiteDto"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    create_site: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateSite"];
+            };
+        };
+        responses: {
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope_SiteDto"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    delete_site: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    update_site: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateSite"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Envelope_SiteDto"];
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -3557,7 +5172,7 @@ export interface operations {
                 qname: string | null;
                 /** @description A client ID or address. */
                 client: string | null;
-                /** @description `forwarded`, `cached`, `local`, `blocked`, `rejected`, `rate_limited` or `failed`. */
+                /** @description `forwarded`, `cached`, `stale`, `local`, `blocked`, `rejected`, `rate_limited` or `failed`. */
                 action: string | null;
                 qtype: string | null;
                 from: string | null;
@@ -3576,6 +5191,61 @@ export interface operations {
                 };
             };
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    export_queries: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description `csv` or `json`. `csv` if not given. */
+                format: string | null;
+                /** @description Matches anywhere in the query name. */
+                qname: string | null;
+                /** @description A client ID or address. */
+                client: string | null;
+                /** @description `forwarded`, `cached`, `stale`, `local`, `blocked`, `rejected`, `rate_limited` or `failed`. */
+                action: string | null;
+                qtype: string | null;
+                from: string | null;
+                to: string | null;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/csv": string;
+                };
+            };
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };

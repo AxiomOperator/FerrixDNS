@@ -27,8 +27,8 @@ pub use handler::ForwardHandler;
 pub use neighbors::{Neighbor, NeighborSource};
 pub use pause::BlockingPause;
 pub use policy::{
-    MutationError, PolicyExport, PolicyHandle, PolicyLoadError, PolicyManager, RevisionInfo,
-    RevisionNotFound, empty_policy,
+    BundleError, MutationError, PolicyExport, PolicyHandle, PolicyLoadError, PolicyManager,
+    RevisionInfo, RevisionNotFound, empty_policy,
 };
 pub use rate_limit::{RateDecision, RateLimiter};
 
@@ -66,6 +66,8 @@ pub struct Services {
     pub rate_limiter: Arc<RateLimiter>,
     pub devices: Arc<DeviceDirectory>,
     pub conditional: Arc<ConditionalPools>,
+    /// The networks allowed to query.
+    pub allow: Arc<Vec<IpNet>>,
 }
 
 impl Services {
@@ -83,6 +85,7 @@ impl Services {
                 rounds: 1,
                 trust_roots: None,
             })),
+            allow: Arc::new(default_allow()),
         }
     }
 }
@@ -112,10 +115,16 @@ pub fn default_allow() -> Vec<IpNet> {
     .collect()
 }
 
-fn deny_everything() -> Vec<IpNet> {
+/// What to deny so that only `allow` gets through.
+///
+/// An allow only overrides a deny that's less specific, so one covering a whole address family
+/// can't override a deny of that family. That family then gets no deny, which still leaves only
+/// allowed addresses, because everything in it is.
+fn deny_all_but(allow: &[IpNet]) -> Vec<IpNet> {
     ["0.0.0.0/0", "::/0"]
         .iter()
-        .filter_map(|network| network.parse().ok())
+        .filter_map(|network| network.parse::<IpNet>().ok())
+        .filter(|deny| !allow.contains(deny))
         .collect()
 }
 
@@ -175,6 +184,7 @@ impl DnsServer {
                 Arc::clone(&conditional),
             ),
             conditional,
+            allow: Arc::new(config.allow.clone()),
         };
         let pool = Arc::new(UpstreamPool::new(config.upstreams).map_err(io::Error::other)?);
         let validator = config.dnssec.map(|dnssec| {
@@ -193,8 +203,9 @@ impl DnsServer {
             validator,
             services: services.clone(),
         });
-        // Allowed networks only take effect where a deny matches, so deny everything first.
-        let mut server = Server::with_access(handler, deny_everything(), config.allow);
+        // Allowed networks only take effect where a deny matches, so deny everything else first.
+        let deny = deny_all_but(&config.allow);
+        let mut server = Server::with_access(handler, deny, config.allow);
 
         let mut local_addrs = Vec::with_capacity(config.listen.len());
         for address in config.listen {

@@ -1,9 +1,11 @@
+import { useQuery } from "@tanstack/react-query";
 import { CircleAlert, Lock } from "lucide-react";
 import type { ReactNode } from "react";
 
 import { Button } from "./ui/button";
 
 import { ApiError, errorMessage } from "@/lib/api/client";
+import { queries } from "@/lib/api/hooks";
 
 export function PageHeader({
   title,
@@ -59,6 +61,18 @@ export function Empty({ title, children }: { title: string; children?: ReactNode
 }
 
 export function ReadOnlyNotice() {
+  const session = useQuery(queries.session());
+  if (session.data?.policy_managed) {
+    return (
+      <div className="mb-4 flex items-start gap-2 rounded-lg border border-border bg-warning-soft px-3 py-2 text-sm text-warning">
+        <Lock aria-hidden className="mt-0.5 size-4 shrink-0" />
+        <p>
+          This node&apos;s policy comes from its central controller, so editing is turned off here.
+          Change it on the controller, then deploy it.
+        </p>
+      </div>
+    );
+  }
   return (
     <div className="mb-4 flex items-start gap-2 rounded-lg border border-border bg-warning-soft px-3 py-2 text-sm text-warning">
       <Lock aria-hidden className="mt-0.5 size-4 shrink-0" />

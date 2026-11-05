@@ -2,6 +2,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, Outlet, useNavigate } from "@tanstack/react-router";
 import {
   Activity,
+  Boxes,
   Database,
   Filter,
   Gauge,
@@ -13,10 +14,13 @@ import {
   Menu,
   Network,
   PanelLeftClose,
+  Rocket,
   PanelLeftOpen,
   Server,
   Settings,
   ShieldBan,
+  Stethoscope,
+  Tv,
   Split,
   Users,
   UsersRound,
@@ -27,6 +31,7 @@ import { toast } from "sonner";
 import { Button } from "./ui/button";
 
 import { BlockingControl } from "@/features/blocking";
+import { SiteBanner, SitePicker } from "@/features/site-context";
 import { NodeChangeBanner } from "@/features/node-settings";
 import { errorMessage, setCsrfToken } from "@/lib/api/client";
 import { api, queries } from "@/lib/api/hooks";
@@ -43,6 +48,7 @@ const NAV: Array<{ heading?: string; items: NavItem[] }> = [
     items: [
       { to: "/", label: "Overview", icon: Gauge },
       { to: "/queries", label: "Query Explorer", icon: Activity },
+      { to: "/diagnostics", label: "Diagnostics", icon: Stethoscope },
       { to: "/clients", label: "Clients", icon: Users },
       { to: "/network", label: "Network", icon: Network },
     ],
@@ -52,6 +58,7 @@ const NAV: Array<{ heading?: string; items: NavItem[] }> = [
     items: [
       { to: "/filtering/rules", label: "Rules", icon: ShieldBan },
       { to: "/filtering/lists", label: "Sources", icon: List },
+      { to: "/filtering/services", label: "Blocked services", icon: Tv },
       { to: "/groups", label: "Groups", icon: UsersRound },
     ],
   },
@@ -68,14 +75,48 @@ const NAV: Array<{ heading?: string; items: NavItem[] }> = [
   },
 ];
 
+const CONTROLLER_NAV: Array<{ heading?: string; items: NavItem[] }> = [
+  {
+    heading: "Fleet",
+    items: [
+      { to: "/", label: "Overview", icon: Gauge },
+      { to: "/fleet/sites", label: "Sites", icon: Boxes },
+      { to: "/fleet/nodes", label: "Nodes", icon: Server },
+      { to: "/fleet/deployments", label: "Deployments", icon: Rocket },
+      { to: "/fleet/activity", label: "Activity", icon: Activity },
+    ],
+  },
+];
+
+/** A site's policy, edited with the same pages as a node's. */
+const SITE_NAV: NavItem[] = [
+  { to: "/filtering/rules", label: "Rules", icon: ShieldBan },
+  { to: "/filtering/lists", label: "Sources", icon: List },
+  { to: "/filtering/services", label: "Blocked services", icon: Tv },
+  { to: "/groups", label: "Groups", icon: UsersRound },
+  { to: "/clients", label: "Clients", icon: Users },
+  { to: "/dns/records", label: "Local DNS", icon: House },
+  { to: "/dns/forwarders", label: "Conditional forwarding", icon: Split },
+  { to: "/fleet/policy-settings", label: "Site settings", icon: Settings },
+];
+
 function Navigation({ collapsed, onNavigate }: { collapsed: boolean; onNavigate?: () => void }) {
+  const session = useQuery(queries.session());
+  const isController = session.data?.role === "controller";
+  const sections = isController
+    ? [
+        ...CONTROLLER_NAV,
+        { heading: "Site policy", items: SITE_NAV },
+      ]
+    : NAV;
   return (
     <nav aria-label="Main" className="flex-1 space-y-4 overflow-y-auto p-2">
-      {NAV.map((section, index) => (
+      {sections.map((section, index) => (
         <div key={section.heading ?? index} className="space-y-0.5">
           {section.heading && !collapsed && (
             <p className="px-2 pb-1 text-xs font-medium text-text-muted">{section.heading}</p>
           )}
+          {section.heading === "Site policy" && !collapsed && <SitePicker />}
           {section.items.map(({ to, label, icon: Icon }) => (
             <Link
               key={to}
@@ -114,6 +155,7 @@ export function AppShell() {
   const [collapsed, setCollapsed] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
   const session = useQuery(queries.session());
+  const isController = session.data?.role === "controller";
   const client = useQueryClient();
   const navigate = useNavigate();
 
@@ -187,7 +229,7 @@ export function AppShell() {
             <Menu aria-hidden className="size-4" />
           </Button>
           <div className="ml-auto flex min-w-0 items-center gap-2">
-            <BlockingControl />
+            {!isController && <BlockingControl />}
             {session.data && (
               <span className="hidden truncate text-sm text-text-secondary sm:inline">
                 {session.data.username}
@@ -199,7 +241,7 @@ export function AppShell() {
             </Button>
           </div>
         </header>
-        <NodeChangeBanner />
+        {isController ? <SiteBanner /> : <NodeChangeBanner />}
         <main className="min-h-0 flex-1 overflow-y-auto p-4 lg:p-6">
           <div className="mx-auto max-w-[1600px]">
             <Outlet />

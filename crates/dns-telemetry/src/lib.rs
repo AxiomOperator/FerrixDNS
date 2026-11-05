@@ -20,7 +20,8 @@ use thiserror::Error;
 use tokio::sync::{broadcast, mpsc};
 
 pub use read::{
-    BucketCounts, ClientCount, DomainCount, Overview, QueryFilter, QueryPage, TelemetryStats,
+    BucketCounts, ClientCount, DomainCount, MinuteCount, Overview, QueryFilter, QueryPage,
+    TelemetryStats,
 };
 
 /// Events waiting for the writer. At 10,000 QPS this covers about 5 seconds (spec section 4.5).
@@ -49,6 +50,8 @@ pub enum Outcome {
     Cached,
     /// Answered from a local zone.
     Local,
+    /// Answered with an expired answer from the cache, because upstreams couldn't answer.
+    Stale,
     /// Answered with the configured block response.
     Blocked,
     /// Rejected by this node, for example an unsupported query.
@@ -64,6 +67,7 @@ impl Outcome {
         match self {
             Self::Forwarded => "forwarded",
             Self::Cached => "cached",
+            Self::Stale => "stale",
             Self::Local => "local",
             Self::Blocked => "blocked",
             Self::Rejected => "rejected",

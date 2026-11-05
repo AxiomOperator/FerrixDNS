@@ -6,7 +6,7 @@ import {
 } from "@tanstack/react-query";
 import { toast } from "sonner";
 
-import { type Schemas, errorMessage, getData, request, sendData } from "./client";
+import { type Schemas, apiUrl, errorMessage, getData, request, sendData } from "./client";
 
 export type Rule = Schemas["RuleDto"];
 export type List = Schemas["ListDto"];
@@ -21,6 +21,10 @@ export type ForwardZone = Schemas["ForwardZoneDto"];
 export type NetworkDevice = Schemas["NetworkDeviceDto"];
 export type NodeSettings = Schemas["NodeSettings"];
 export type NodeSettingsView = Schemas["NodeSettingsView"];
+export type BlockedService = Schemas["BlockedServiceDto"];
+export type Site = Schemas["SiteDto"];
+export type FleetNode = Schemas["NodeDto"];
+export type Deployment = Schemas["DeploymentDto"];
 
 export interface QueryFilters {
   qname?: string;
@@ -53,6 +57,11 @@ function queryString(values: Record<string, string | number | undefined>): strin
   }
   const text = params.toString();
   return text ? `?${text}` : "";
+}
+
+/** Where to download the query log, with the same filters as the Query Explorer. */
+export function queryExportUrl(format: "csv" | "json", filters: QueryFilters): string {
+  return apiUrl(`/queries/export${queryString({ format, ...filters })}`);
 }
 
 export const queries = {
@@ -108,6 +117,12 @@ export const queries = {
       queryFn: ({ signal }) => getData<List[]>("/lists", signal),
       refetchInterval: REFRESH_MS,
     }),
+  blockedServices: () =>
+    queryOptions({
+      queryKey: ["blocked-services"],
+      queryFn: ({ signal }) => getData<BlockedService[]>("/blocked-services", signal),
+      refetchInterval: REFRESH_MS,
+    }),
   clients: () =>
     queryOptions({
       queryKey: ["clients"],
@@ -118,6 +133,41 @@ export const queries = {
     queryOptions({
       queryKey: ["groups"],
       queryFn: ({ signal }) => getData<Group[]>("/groups", signal),
+      refetchInterval: REFRESH_MS,
+    }),
+  fleetOverview: (hours: number) =>
+    queryOptions({
+      queryKey: ["fleet-overview", hours],
+      queryFn: ({ signal }) =>
+        timed("fleet-overview", () =>
+          getData<Schemas["FleetOverviewDto"]>(`/fleet/overview${queryString({ hours })}`, signal),
+        ),
+      refetchInterval: pacedRefresh("fleet-overview"),
+    }),
+  sites: () =>
+    queryOptions({
+      queryKey: ["fleet-sites"],
+      queryFn: ({ signal }) => timed("fleet-sites", () => getData<Site[]>("/fleet/sites", signal)),
+      refetchInterval: pacedRefresh("fleet-sites"),
+    }),
+  fleetNodes: () =>
+    queryOptions({
+      queryKey: ["fleet-nodes"],
+      queryFn: ({ signal }) => timed("fleet-nodes", () => getData<FleetNode[]>("/fleet/nodes", signal)),
+      refetchInterval: pacedRefresh("fleet-nodes"),
+    }),
+  deployments: () =>
+    queryOptions({
+      queryKey: ["fleet-deployments"],
+      queryFn: ({ signal }) =>
+        timed("fleet-deployments", () => getData<Deployment[]>("/fleet/deployments", signal)),
+      refetchInterval: pacedRefresh("fleet-deployments"),
+    }),
+  enrollmentTokens: () =>
+    queryOptions({
+      queryKey: ["fleet-tokens"],
+      queryFn: ({ signal }) =>
+        getData<Schemas["EnrollmentTokenDto"][]>("/fleet/enrollment-tokens", signal),
       refetchInterval: REFRESH_MS,
     }),
   blocking: () =>
@@ -199,6 +249,7 @@ export const queries = {
 const POLICY_KEYS = [
   "rules",
   "lists",
+  "blocked-services",
   "clients",
   "groups",
   "zones",
@@ -211,6 +262,11 @@ const POLICY_KEYS = [
   "system",
   "settings",
   "audit",
+  "fleet-overview",
+  "fleet-sites",
+  "fleet-nodes",
+  "fleet-deployments",
+  "fleet-tokens",
 ];
 
 /**
@@ -246,6 +302,10 @@ export const api = {
     sendData<List>("PATCH", `/lists/${id}`, { body }),
   deleteList: (id: string) => request<void>("DELETE", `/lists/${id}`),
   refreshList: (id: string) => sendData<Schemas["JobDto"]>("POST", `/lists/${id}/refresh`),
+  setBlockedService: (id: string, body: Schemas["SetBlockedService"]) =>
+    sendData<BlockedService>("PUT", `/blocked-services/${encodeURIComponent(id)}`, { body }),
+  diagnose: (body: Schemas["DiagnoseRequest"]) =>
+    sendData<Schemas["DiagnosticReport"]>("POST", "/diagnostics/lookup", { body }),
   createClient: (body: Schemas["CreateClient"]) => sendData<Client>("POST", "/clients", { body }),
   updateClient: (id: string, body: Schemas["UpdateClient"]) =>
     sendData<Client>("PATCH", `/clients/${id}`, { body }),
@@ -279,6 +339,21 @@ export const api = {
     sendData<Schemas["SaveNodeSettingsResponse"]>("PUT", "/node-settings", { body }),
   keepNodeSettings: () => sendData<NodeSettingsView>("POST", "/node-settings/confirm"),
   undoNodeSettings: () => sendData<NodeSettingsView>("POST", "/node-settings/undo"),
+  createSite: (body: Schemas["CreateSite"]) => sendData<Site>("POST", "/fleet/sites", { body }),
+  updateSite: (id: string, body: Schemas["UpdateSite"]) =>
+    sendData<Site>("PATCH", `/fleet/sites/${id}`, { body }),
+  deleteSite: (id: string) => request<void>("DELETE", `/fleet/sites/${id}`),
+  renameNode: (id: string, body: Schemas["UpdateNode"]) =>
+    request<void>("PATCH", `/fleet/nodes/${id}`, { body }),
+  removeNode: (id: string) => request<void>("DELETE", `/fleet/nodes/${id}`),
+  createEnrollmentToken: (body: Schemas["CreateEnrollmentToken"]) =>
+    sendData<Schemas["EnrollmentTokenCreated"]>("POST", "/fleet/enrollment-tokens", { body }),
+  deleteEnrollmentToken: (id: string) => request<void>("DELETE", `/fleet/enrollment-tokens/${id}`),
+  deploy: (body: Schemas["CreateDeployment"]) =>
+    sendData<Deployment>("POST", "/fleet/deployments", { body }),
+  promoteDeployment: (id: string) => sendData<Deployment>("POST", `/fleet/deployments/${id}/promote`),
+  rollbackDeployment: (id: string) =>
+    sendData<Deployment>("POST", `/fleet/deployments/${id}/rollback`, { body: {} }),
   login: (body: Schemas["LoginRequest"]) =>
     sendData<Schemas["SessionInfo"]>("POST", "/auth/login", { body }),
   setup: (body: Schemas["SetupRequest"]) =>

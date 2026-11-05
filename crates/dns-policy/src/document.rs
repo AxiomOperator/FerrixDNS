@@ -16,6 +16,7 @@ use crate::evaluate::{Action, ChainOutcome, ClientContext, Decision, NameContext
 use crate::forward::{ForwardRoute, ForwardZoneDef, ForwardZones};
 use crate::local::{LocalAnswer, LocalQuery, LocalRecordDef, LocalZoneDef, LocalZones};
 use crate::name::{DomainName, NameError};
+use crate::services::find_service;
 
 /// The policy document version this build understands.
 pub const SCHEMA_VERSION: u32 = 1;
@@ -69,6 +70,8 @@ pub enum PolicyError {
     ArtifactUnavailable { list_id: String, reason: String },
     #[error("{0}")]
     LocalDns(String),
+    #[error("this node doesn't know the service {0:?}. It may need upgrading")]
+    UnknownService(String),
     #[error("cannot serialize the policy document: {0}")]
     Serialize(#[from] toml::ser::Error),
     #[error(transparent)]
@@ -313,6 +316,16 @@ pub struct ListDef {
     pub suffixes: Vec<String>,
 }
 
+/// A well-known service that's blocked, by the ID from [`crate::SERVICES`].
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct BlockedServiceDef {
+    pub service: String,
+    /// Groups it's blocked for. With no groups, it's blocked at global scope.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<String>,
+}
+
 /// The full local policy: the source that revisions are stored and compiled from.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -339,6 +352,8 @@ pub struct PolicyDocument {
     pub local_records: Vec<LocalRecordDef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub forward_zones: Vec<ForwardZoneDef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocked_services: Vec<BlockedServiceDef>,
     #[serde(default, skip_serializing_if = "RateLimitConfig::is_default")]
     pub rate_limit: RateLimitConfig,
 }
@@ -357,6 +372,7 @@ impl Default for PolicyDocument {
             local_zones: Vec::new(),
             local_records: Vec::new(),
             forward_zones: Vec::new(),
+            blocked_services: Vec::new(),
             rate_limit: RateLimitConfig::default(),
         }
     }
@@ -381,7 +397,8 @@ impl PolicyDocument {
 
     fn compile_rules(&self) -> Result<Vec<Rule>, PolicyError> {
         let mut seen = HashSet::new();
-        self.rules
+        let mut rules = self
+            .rules
             .iter()
             .map(|rule| {
                 if !seen.insert(rule.id.as_str()) {
@@ -411,7 +428,21 @@ impl PolicyDocument {
                     expires_at,
                 })
             })
-            .collect()
+            .collect::<Result<Vec<_>, PolicyError>>()?;
+
+        let mut services = HashSet::new();
+        for blocked in &self.blocked_services {
+            if !services.insert(blocked.service.as_str()) {
+                return Err(PolicyError::DuplicateId {
+                    kind: "blocked service",
+                    id: blocked.service.clone(),
+                });
+            }
+            let service = find_service(&blocked.service)
+                .ok_or_else(|| PolicyError::UnknownService(blocked.service.clone()))?;
+            rules.extend(crate::services::expand(blocked, service));
+        }
+        Ok(rules)
     }
 
     fn compile_lists(&self, artifacts: ArtifactLoader<'_>) -> Result<ListLayer, PolicyError> {
@@ -492,6 +523,16 @@ impl PolicyDocument {
                     "rule {} never applies: it targets {problem}",
                     rule.id
                 ));
+            }
+        }
+        for blocked in &self.blocked_services {
+            for group in &blocked.groups {
+                if !groups.contains(group.as_str()) {
+                    warnings.push(format!(
+                        "service {} isn't blocked for group {group:?}, which has no clients",
+                        blocked.service
+                    ));
+                }
             }
         }
         let can_learn_hostnames = !self.forward_zones.is_empty() || !self.local_records.is_empty();

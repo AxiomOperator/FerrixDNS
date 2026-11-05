@@ -14,6 +14,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
+control-plane.workspace = true
 dns-backup.workspace = true
 dns-cache.workspace = true
 dns-lists.workspace = true
@@ -23,6 +24,7 @@ dns-storage.workspace = true
 dns-telemetry.workspace = true
 dns-upstreams.workspace = true
 ipnet.workspace = true
+node-agent.workspace = true
 node-api.workspace = true
 node-ntp.workspace = true
 rcgen.workspace = true

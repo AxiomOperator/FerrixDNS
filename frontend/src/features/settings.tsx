@@ -203,6 +203,19 @@ function SettingsForm({ settings, readOnly }: { settings: Settings; readOnly: bo
   );
 }
 
+/** A site's blocking and logging settings, on a controller. */
+export function SitePolicySettingsPage() {
+  const settings = useQuery(queries.settings());
+  return (
+    <>
+      <PageHeader title="Site settings" description="How this site's nodes block and log queries." />
+      {settings.isPending && <Loading />}
+      {settings.isError && <ErrorState error={settings.error} onRetry={() => void settings.refetch()} />}
+      {settings.data && <SettingsForm settings={settings.data} readOnly={false} />}
+    </>
+  );
+}
+
 function PasswordCard() {
   const [current, setCurrent] = useState("");
   const [next, setNext] = useState("");

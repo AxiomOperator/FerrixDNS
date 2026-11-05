@@ -40,6 +40,7 @@ pub struct Readiness {
 pub struct AuthStatus {
     /// True until the first administrator has been created.
     pub setup_required: bool,
+    pub role: ServerRole,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -68,8 +69,19 @@ pub struct SessionInfo {
     /// Send this in the `X-CSRF-Token` header on requests that change anything.
     pub csrf_token: String,
     pub expires_at: String,
-    /// True when the policy comes from a file, which disables editing.
+    /// True when the policy comes from a file or a controller, which disables editing.
     pub policy_read_only: bool,
+    /// True when the policy comes from a central controller.
+    pub policy_managed: bool,
+    pub role: ServerRole,
+}
+
+/// What this server is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum ServerRole {
+    Node,
+    Controller,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, ToSchema)]
@@ -548,6 +560,10 @@ pub struct CacheDto {
     pub entries: u64,
     pub bytes: u64,
     pub max_bytes: u64,
+    /// Expired answers given out because upstreams couldn't answer.
+    pub stale_served: u64,
+    /// Popular answers refreshed before they expired.
+    pub prefetches: u64,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -556,6 +572,104 @@ pub struct UpstreamDto {
     pub responses: u64,
     pub failures: u64,
     pub last_latency_us: u64,
+    /// The forward zones that use this server, or nothing for a default upstream.
+    pub forward_zones: Option<String>,
+    /// The minutes with activity in the last hour, oldest first.
+    pub history: Vec<UpstreamMinuteDto>,
+}
+
+/// One minute of an upstream server's activity.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct UpstreamMinuteDto {
+    pub start: String,
+    pub responses: u64,
+    pub failures: u64,
+    pub average_latency_us: u64,
+}
+
+/// A service that can be blocked in one step.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct BlockedServiceDto {
+    pub id: String,
+    pub name: String,
+    pub category: String,
+    pub domains: Vec<String>,
+    pub blocked: bool,
+    /// Who it's blocked for. Empty means everyone.
+    pub groups: Vec<String>,
+}
+
+/// Whether a service is blocked, and for whom.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct SetBlockedService {
+    pub blocked: bool,
+    /// Who to block it for. Empty means everyone.
+    #[serde(default)]
+    pub groups: Vec<String>,
+}
+
+/// What to look into.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct DiagnoseRequest {
+    pub name: String,
+    /// The record type, such as `A` or `AAAA`. `A` if not given.
+    #[serde(rename = "type")]
+    pub record_type: Option<String>,
+    /// The device asking. Without one, only rules for everyone apply.
+    pub client_ip: Option<String>,
+}
+
+/// How one step of answering went.
+#[derive(Debug, Clone, Copy, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DiagnosticStatus {
+    /// Nothing to worry about.
+    Ok,
+    /// Worth knowing, but it isn't stopping anything.
+    Info,
+    /// Probably not what you want.
+    Warning,
+    /// This decides the answer, and the device doesn't get what it asked for.
+    Stopped,
+}
+
+/// One step of answering a query.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct DiagnosticStep {
+    pub title: String,
+    pub status: DiagnosticStatus,
+    pub detail: String,
+}
+
+/// What one upstream server said when asked directly.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct DiagnosticProbe {
+    pub server: String,
+    pub ok: bool,
+    pub rcode: Option<String>,
+    pub latency_ms: f64,
+    pub answers: Vec<String>,
+    pub error: Option<String>,
+}
+
+/// How this node would answer a query right now, and why.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct DiagnosticReport {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub record_type: String,
+    pub client_ip: Option<String>,
+    pub client_id: Option<String>,
+    /// `refused`, `blocked`, `local`, `cached`, `forwarded`, `stale` or `failed`.
+    pub result: String,
+    /// The conclusion in a sentence.
+    pub summary: String,
+    pub answers: Vec<String>,
+    pub steps: Vec<DiagnosticStep>,
+    pub upstreams: Vec<DiagnosticProbe>,
+    /// The most recent queries in the log with this name in them.
+    pub recent: Vec<QueryEventDto>,
+    pub revision: String,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -841,7 +955,23 @@ pub struct QueryParams {
     pub qname: Option<String>,
     /// A client ID or address.
     pub client: Option<String>,
-    /// `forwarded`, `cached`, `local`, `blocked`, `rejected`, `rate_limited` or `failed`.
+    /// `forwarded`, `cached`, `stale`, `local`, `blocked`, `rejected`, `rate_limited` or `failed`.
+    pub action: Option<String>,
+    pub qtype: Option<String>,
+    pub from: Option<String>,
+    pub to: Option<String>,
+}
+
+/// Filters for exporting the query log.
+#[derive(Debug, Deserialize, IntoParams)]
+pub struct QueryExportParams {
+    /// `csv` or `json`. `csv` if not given.
+    pub format: Option<String>,
+    /// Matches anywhere in the query name.
+    pub qname: Option<String>,
+    /// A client ID or address.
+    pub client: Option<String>,
+    /// `forwarded`, `cached`, `stale`, `local`, `blocked`, `rejected`, `rate_limited` or `failed`.
     pub action: Option<String>,
     pub qtype: Option<String>,
     pub from: Option<String>,
@@ -866,6 +996,7 @@ pub struct QuestionDto {
 pub enum QueryAction {
     Forwarded,
     Cached,
+    Stale,
     Local,
     Blocked,
     Rejected,
@@ -878,6 +1009,7 @@ impl From<Outcome> for QueryAction {
         match outcome {
             Outcome::Forwarded => Self::Forwarded,
             Outcome::Cached => Self::Cached,
+            Outcome::Stale => Self::Stale,
             Outcome::Local => Self::Local,
             Outcome::Blocked => Self::Blocked,
             Outcome::Rejected => Self::Rejected,

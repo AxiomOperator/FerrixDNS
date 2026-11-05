@@ -102,6 +102,7 @@ async fn start_with(options: Options) -> Node {
         services: options.services.clone(),
         ntp: None,
         node: None,
+        role: crate::ServerRole::Node,
     })
     .await
     .unwrap();
@@ -1179,7 +1180,7 @@ async fn responses_carry_security_headers_and_unknown_api_paths_are_json() {
 
 #[test]
 fn the_openapi_contract_describes_the_api() {
-    let spec: Value = serde_json::from_str(&crate::openapi_json().unwrap()).unwrap();
+    let spec: Value = serde_json::from_str(&crate::openapi().to_pretty_json().unwrap()).unwrap();
     assert!(spec["openapi"].as_str().unwrap().starts_with("3.1"));
     let paths = spec["paths"].as_object().unwrap();
     for path in [
@@ -1697,4 +1698,274 @@ async fn node_settings_need_a_session_and_csrf_and_report_when_unavailable() {
     node.setup().await;
     let response = node.get("/api/v1/node-settings").await;
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test]
+async fn the_query_log_exports_safely_with_its_filters() {
+    let mut node = start().await;
+    node.setup().await;
+    let now = crate::util::now_ms();
+    let mut risky = query_event(now, "=cmd.example", Outcome::Blocked);
+    risky.client_ip = Some("10.0.0.1".to_owned());
+    node.telemetry.record(risky, QueryLogMode::Full);
+    node.telemetry.record(
+        query_event(now, "plain.example", Outcome::Forwarded),
+        QueryLogMode::Full,
+    );
+    wait_for_queries(&node, 2).await;
+
+    let response = node.get("/api/v1/queries/export").await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        response.headers()["content-disposition"]
+            .to_str()
+            .unwrap()
+            .contains(".csv"),
+    );
+    let body = response.text().await.unwrap();
+    assert!(body.starts_with("time,client_id"), "{body}");
+    assert!(
+        body.contains(",'=cmd.example,"),
+        "a name can't run as a formula: {body}"
+    );
+    assert_eq!(body.lines().count(), 3, "{body}");
+
+    let response = node
+        .get("/api/v1/queries/export?format=json&action=forwarded")
+        .await;
+    let rows: Value = response.json().await.unwrap();
+    assert_eq!(rows.as_array().unwrap().len(), 1, "{rows}");
+    assert_eq!(rows[0]["question"]["name"], "plain.example");
+
+    assert_eq!(
+        node.get("/api/v1/queries/export?format=xml").await.status(),
+        StatusCode::UNPROCESSABLE_ENTITY,
+    );
+    let audit = node.get("/api/v1/audit-events").await.text().await.unwrap();
+    assert!(audit.contains("queries.export"), "{audit}");
+    node.cookie = None;
+    assert_eq!(
+        node.get("/api/v1/queries/export").await.status(),
+        StatusCode::UNAUTHORIZED
+    );
+}
+
+#[tokio::test]
+async fn blocked_services_block_every_domain_and_can_be_undone() {
+    let mut node = start().await;
+    node.setup().await;
+    let check = |domain: &str| {
+        let policy = node.manager.handle().load_full();
+        let name = DomainName::parse(domain).unwrap();
+        let ip: std::net::IpAddr = "10.0.0.1".parse().unwrap();
+        matches!(policy.check_query(ip, &name), dns_policy::Verdict::Block(_))
+    };
+    assert!(!check("www.tiktok.com"));
+
+    let response = node
+        .send(
+            Method::PUT,
+            "/api/v1/blocked-services/tiktok",
+            Some(json!({"blocked": true})),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(check("www.tiktok.com") && check("v16.tiktokcdn.com"));
+    assert!(!check("example.com"));
+
+    let list: Value = node
+        .get("/api/v1/blocked-services")
+        .await
+        .json()
+        .await
+        .unwrap();
+    let tiktok = list["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["id"] == "tiktok")
+        .unwrap();
+    assert_eq!(tiktok["blocked"], true);
+    assert_eq!(tiktok["name"], "TikTok");
+
+    // The history shows it, and a restored revision would bring it back.
+    assert!(
+        node.manager
+            .document()
+            .to_toml()
+            .unwrap()
+            .contains("blocked_services")
+    );
+
+    let response = node
+        .send(
+            Method::PUT,
+            "/api/v1/blocked-services/tiktok",
+            Some(json!({"blocked": false})),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(!check("www.tiktok.com"));
+
+    assert_eq!(
+        node.send(
+            Method::PUT,
+            "/api/v1/blocked-services/nothing",
+            Some(json!({"blocked": true}))
+        )
+        .await
+        .status(),
+        StatusCode::NOT_FOUND,
+    );
+    assert_eq!(
+        node.send(
+            Method::PUT,
+            "/api/v1/blocked-services/tiktok",
+            Some(json!({"blocked": true, "groups": ["nobody"]}))
+        )
+        .await
+        .status(),
+        StatusCode::UNPROCESSABLE_ENTITY,
+    );
+    assert!(
+        !check("www.tiktok.com"),
+        "a rejected change leaves the policy alone"
+    );
+}
+
+#[tokio::test]
+async fn a_blocked_service_can_apply_to_one_group_and_allows_make_exceptions() {
+    let mut node = start().await;
+    node.setup().await;
+    let created = node
+        .send(Method::POST, "/api/v1/groups", Some(json!({"id": "kids"})))
+        .await;
+    assert_eq!(created.status(), StatusCode::CREATED);
+    let created = node
+        .send(
+            Method::POST,
+            "/api/v1/clients",
+            Some(json!({"name": "tablet", "addresses": ["10.0.0.5"], "groups": ["kids"]})),
+        )
+        .await;
+    assert_eq!(created.status(), StatusCode::CREATED);
+    node.send(
+        Method::PUT,
+        "/api/v1/blocked-services/youtube",
+        Some(json!({"blocked": true, "groups": ["kids"]})),
+    )
+    .await;
+    let check = |address: &str, domain: &str| {
+        let policy = node.manager.handle().load_full();
+        let name = DomainName::parse(domain).unwrap();
+        let ip: std::net::IpAddr = address.parse().unwrap();
+        matches!(policy.check_query(ip, &name), dns_policy::Verdict::Block(_))
+    };
+    assert!(check("10.0.0.5", "www.youtube.com"));
+    assert!(!check("10.0.0.6", "www.youtube.com"));
+
+    // The query log names the service, not an internal rule ID.
+    let (rules, _) = crate::routes::policy_labels(&node.manager.document());
+    assert_eq!(
+        rules.get("service:youtube:youtube.com@kids").unwrap(),
+        "YouTube (blocked service)",
+    );
+}
+
+#[tokio::test]
+async fn diagnostics_explain_each_way_a_query_can_end() {
+    let mut node = start().await;
+    node.setup().await;
+    node.send(
+        Method::POST,
+        "/api/v1/rules", Some(json!({"action": "deny", "match_type": "exact", "pattern": "bad.example", "scope": {"kind": "global"}})))
+    .await;
+    node.send(
+        Method::POST,
+        "/api/v1/dns/zones",
+        Some(json!({"name": "home.arpa"})),
+    )
+    .await;
+
+    async fn report(node: &Node, body: Value) -> Value {
+        let response = node
+            .send(Method::POST, "/api/v1/diagnostics/lookup", Some(body))
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value = response.json().await.unwrap();
+        body["data"].clone()
+    }
+
+    let blocked = report(&node, json!({"name": "bad.example"})).await;
+    assert_eq!(blocked["result"], "blocked");
+    assert!(
+        blocked["summary"].as_str().unwrap().contains("bad.example"),
+        "{blocked}"
+    );
+    assert!(
+        blocked["upstreams"].as_array().unwrap().is_empty(),
+        "a block doesn't go upstream"
+    );
+
+    let local = report(&node, json!({"name": "nothing.home.arpa"})).await;
+    assert_eq!(local["result"], "local", "{local}");
+
+    let refused = report(
+        &node,
+        json!({"name": "good.example", "client_ip": "8.8.8.8"}),
+    )
+    .await;
+    assert_eq!(refused["result"], "refused", "{refused}");
+
+    // The only upstream in these tests is a closed port.
+    let failed = report(
+        &node,
+        json!({"name": "good.example", "client_ip": "10.0.0.1", "type": "AAAA"}),
+    )
+    .await;
+    assert_eq!(failed["result"], "failed", "{failed}");
+    assert_eq!(failed["type"], "AAAA");
+    assert_eq!(failed["upstreams"][0]["ok"], false, "{failed}");
+    let upstreams: Value = node
+        .get("/api/v1/dns/upstreams")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        upstreams["data"][0]["failures"], 0,
+        "diagnostics don't change counts"
+    );
+
+    for bad in [
+        json!({"name": "not a name"}),
+        json!({"name": "a.example", "type": "AXFR"}),
+        json!({"name": "a.example", "client_ip": "x"}),
+    ] {
+        let response = node
+            .send(Method::POST, "/api/v1/diagnostics/lookup", Some(bad))
+            .await;
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+}
+
+#[tokio::test]
+async fn a_managed_node_says_so_and_refuses_local_policy_changes() {
+    let mut node = start().await;
+    node.setup().await;
+    node.manager.set_managed();
+    let session: Value = node.get("/api/v1/auth/session").await.json().await.unwrap();
+    assert_eq!(session["data"]["policy_read_only"], true);
+    assert_eq!(session["data"]["policy_managed"], true);
+    assert_eq!(session["data"]["role"], "node");
+
+    let response = node
+        .post(
+            "/api/v1/rules",
+            json!({"action": "deny", "match_type": "exact", "pattern": "a.example", "scope": {"kind": "global"}}),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "POLICY_MANAGED");
 }

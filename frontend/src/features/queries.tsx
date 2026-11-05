@@ -1,5 +1,5 @@
 import { useInfiniteQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { useNavigate, useSearch } from "@tanstack/react-router";
+import { Link, useNavigate, useSearch } from "@tanstack/react-router";
 import {
   type ColumnDef,
   flexRender,
@@ -18,8 +18,8 @@ import { Card } from "@/components/ui/card";
 import { Dialog } from "@/components/ui/dialog";
 import { Field, Input, Select } from "@/components/ui/form";
 import { Switch } from "@/components/ui/switch";
-import { errorMessage } from "@/lib/api/client";
-import { type QueryEvent, type QueryFilters, api, queries } from "@/lib/api/hooks";
+import { apiUrl, errorMessage } from "@/lib/api/client";
+import { type QueryEvent, type QueryFilters, api, queries, queryExportUrl } from "@/lib/api/hooks";
 import { formatDuration, formatTime, shortRevision } from "@/lib/format";
 
 const ROW_HEIGHT = 41;
@@ -33,6 +33,8 @@ function ResultBadge({ event }: { event: QueryEvent }) {
       return <Badge tone="success">Forwarded</Badge>;
     case "cached":
       return <Badge tone="success">Cached</Badge>;
+    case "stale":
+      return <Badge tone="warning">Expired answer</Badge>;
     case "local":
       return <Badge tone="success">Local</Badge>;
     case "rejected":
@@ -118,6 +120,8 @@ function explanation(event: QueryEvent): string {
         : "No rule blocked this, so it was answered upstream.";
     case "cached":
       return "No rule blocked this, and it was answered from the cache. Current rules are checked on every cached answer.";
+    case "stale":
+      return "No rule blocked this. The upstream servers couldn't answer, so this node used its last known answer, which had expired. Current rules are still checked on it.";
     case "local":
       return "This node answered itself, from a local zone or a name reserved for local use. It wasn't sent upstream.";
     case "rejected":
@@ -255,6 +259,17 @@ function EventDrawer({
             {event.decision.matched_name && <Detail label="Matched name">{event.decision.matched_name}</Detail>}
             {event.revision_id && <Detail label="Policy revision">{shortRevision(event.revision_id)}</Detail>}
           </dl>
+          <Link
+            to="/diagnostics"
+            search={{
+              name: event.question.name ?? undefined,
+              type: event.question.type,
+              client: event.client.address ?? undefined,
+            }}
+            className="mt-3 inline-block text-sm font-medium text-accent underline underline-offset-2"
+          >
+            Diagnose this query
+          </Link>
           {event.decision.action === "blocked" && (
             <ExceptionForm key={event.occurred_at} event={event} onDone={onClose} readOnly={readOnly} />
           )}
@@ -292,7 +307,7 @@ export function QueriesPage({ readOnly }: { readOnly: boolean }) {
   useEffect(() => {
     setLiveEvents([]);
     if (!live) return;
-    const source = new EventSource("/api/v1/queries/stream");
+    const source = new EventSource(apiUrl("/queries/stream"));
     // Queries answered while the stream was off, or reconnecting after a restart, were never sent.
     source.addEventListener("open", () => void refetchLog());
     source.addEventListener("query", (message) => {
@@ -339,9 +354,25 @@ export function QueriesPage({ readOnly }: { readOnly: boolean }) {
         title="Query Explorer"
         description="See each query, and why it was allowed or blocked."
         actions={
-          <div className="flex items-center gap-2 text-sm text-text-secondary">
-            <Switch checked={live} onCheckedChange={setLive} label="Live updates" />
-            Live updates
+          <div className="flex flex-wrap items-center gap-3 text-sm text-text-secondary">
+            <span className="flex items-center gap-2">
+              <Switch checked={live} onCheckedChange={setLive} label="Live updates" />
+              Live updates
+            </span>
+            <a
+              href={queryExportUrl("csv", filters)}
+              download
+              className="inline-flex h-8 items-center rounded-md border border-border-strong bg-surface px-2.5 text-xs font-medium text-text hover:bg-surface-muted"
+            >
+              Export CSV
+            </a>
+            <a
+              href={queryExportUrl("json", filters)}
+              download
+              className="inline-flex h-8 items-center rounded-md border border-border-strong bg-surface px-2.5 text-xs font-medium text-text hover:bg-surface-muted"
+            >
+              Export JSON
+            </a>
           </div>
         }
       />
@@ -370,6 +401,7 @@ export function QueriesPage({ readOnly }: { readOnly: boolean }) {
             <option value="blocked">Blocked</option>
             <option value="forwarded">Forwarded</option>
             <option value="cached">Cached</option>
+            <option value="stale">Expired answer</option>
             <option value="local">Local</option>
             <option value="failed">Failed</option>
             <option value="rejected">Rejected</option>

@@ -9,6 +9,9 @@ members = [
     "crates/dns-runtime",
     "crates/dns-storage",
     "crates/dns-telemetry",
+    "crates/control-plane",
+    "crates/fleet-contract",
+    "crates/node-agent",
     "crates/node-api",
     "crates/node-bin",
     "crates/node-ntp",
@@ -32,6 +35,9 @@ dns-upstreams = { path = "crates/dns-upstreams" }
 dns-runtime = { path = "crates/dns-runtime" }
 dns-storage = { path = "crates/dns-storage" }
 dns-telemetry = { path = "crates/dns-telemetry" }
+control-plane = { path = "crates/control-plane" }
+fleet-contract = { path = "crates/fleet-contract" }
+node-agent = { path = "crates/node-agent" }
 node-api = { path = "crates/node-api" }
 node-ntp = { path = "crates/node-ntp" }
 
@@ -57,6 +63,7 @@ libc = "0.2"
 moka = { version = "0.12", features = ["sync"] }
 rand = "0.9"
 regex = "1.13"
+ring = "0.17"
 reqwest = { version = "0.13", default-features = false, features = ["http2", "rustls-no-provider", "stream"] }
 rustls = { version = "0.23", default-features = false, features = ["logging", "ring", "std", "tls12"] }
 rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring"] }

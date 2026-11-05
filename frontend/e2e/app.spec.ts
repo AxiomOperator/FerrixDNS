@@ -1,4 +1,6 @@
 import AxeBuilder from "@axe-core/playwright";
+import { readFileSync } from "node:fs";
+
 import { type Page, expect, test } from "@playwright/test";
 
 import { type Node, RCODE, startNode } from "./harness";
@@ -223,11 +225,79 @@ test("clients can be named and given their own rules", async () => {
   await expect(page.getByText(/still use this group/).first()).toBeVisible();
 });
 
+test("the query log downloads with its filters, and names can't run as spreadsheet formulas", async () => {
+  await sendUntil("exported-name.example", RCODE.NOERROR);
+  await goTo("Query Explorer", "Query Explorer");
+  await page.getByLabel("Domain contains").fill("exported-name");
+  await expect(page).toHaveURL(/qname=exported-name/);
+  const [csv] = await Promise.all([
+    page.waitForEvent("download"),
+    page.getByRole("link", { name: "Export CSV" }).click(),
+  ]);
+  expect(csv.suggestedFilename()).toMatch(/^ferrixdns-queries-.*\.csv$/);
+  const text = readFileSync(await csv.path(), "utf8");
+  expect(text).toContain("exported-name.example");
+  expect(text).not.toContain("blocked-by-rule.example");
+  const [json] = await Promise.all([
+    page.waitForEvent("download"),
+    page.getByRole("link", { name: "Export JSON" }).click(),
+  ]);
+  const rows = JSON.parse(readFileSync(await json.path(), "utf8")) as { question: { name: string } }[];
+  expect(rows.every((row) => row.question.name.includes("exported-name"))).toBe(true);
+  await page.getByLabel("Domain contains").fill("");
+  await expect(page).not.toHaveURL(/qname=/);
+});
+
+test("a service can be blocked in one step, and real queries for it are blocked", async () => {
+  expect(await node.rcode("www.tiktok.com")).toBe(RCODE.NOERROR);
+  await goTo("Blocked services", "Blocked services");
+  await checkPage("services");
+  await page.getByLabel("Search services").fill("tiktok");
+  await page.getByRole("switch", { name: "Block TikTok" }).click();
+  await expect(page.getByRole("status")).toHaveText("1 service blocked");
+  await sendUntil("www.tiktok.com", RCODE.NXDOMAIN);
+  await expect(page.getByText("Blocked for everyone", { exact: true })).toBeVisible();
+
+  await goTo("Diagnostics", "Diagnostics");
+  await page.getByLabel("Name").fill("www.tiktok.com");
+  await page.getByRole("button", { name: "Check" }).click();
+  await expect(page.getByRole("status")).toContainText("TikTok");
+
+  await goTo("Blocked services", "Blocked services");
+  await page.getByLabel("Search services").fill("tiktok");
+  await page.getByRole("switch", { name: "Block TikTok" }).click();
+  await expect(page.getByRole("status")).toHaveText("0 services blocked");
+  await sendUntil("www.tiktok.com", RCODE.NOERROR);
+});
+
+test("diagnostics explain an answer and what each server said", async () => {
+  await goTo("Diagnostics", "Diagnostics");
+  await checkPage("diagnostics-empty");
+  await page.getByLabel("Name").fill("diagnosed.example");
+  await page.getByRole("button", { name: "Check" }).click();
+  await expect(page.getByRole("status")).toContainText("A device gets an answer");
+  await expect(page.getByRole("heading", { name: "What each server said" })).toBeVisible();
+  await expect(page.getByRole("cell", { name: /192\.0\.2\.1/ })).toBeVisible();
+  await checkPage("diagnostics");
+
+  // A query in the log leads here, already filled in.
+  await sendUntil("from-the-log.example", RCODE.NOERROR);
+  await goTo("Query Explorer", "Query Explorer");
+  await page.getByRole("button", { name: /from-the-log\.example/ }).first().click();
+  await page.getByRole("link", { name: "Diagnose this query" }).click();
+  await expect(page.getByRole("heading", { level: 1, name: "Diagnostics" })).toBeVisible();
+  await expect(page.getByLabel("Name")).toHaveValue("from-the-log.example");
+  await expect(page.getByRole("status")).toContainText("A device gets an answer");
+});
+
 test("upstreams can be tested", async () => {
   await goTo("Upstreams", "Upstreams");
   await page.getByRole("button", { name: "Test upstreams" }).click();
   await expect(page.getByRole("status")).toContainText("Reachable");
+  await expect(page.getByRole("heading", { level: 2, name: /127\.0\.0\.1/ })).toBeVisible();
   await checkPage("upstreams");
+  await page.getByRole("button", { name: "Show table" }).click();
+  await expect(page.getByRole("columnheader", { name: "Response time", exact: true })).toBeVisible();
 });
 
 test("local DNS answers from zones, and lists can't block local names", async () => {

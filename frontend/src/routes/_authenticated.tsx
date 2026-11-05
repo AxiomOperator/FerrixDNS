@@ -2,7 +2,7 @@ import { createFileRoute, redirect, useRouter } from "@tanstack/react-router";
 import { useEffect } from "react";
 
 import { AppShell } from "@/components/app-shell";
-import { ApiError, setCsrfToken, setUnauthenticatedHandler } from "@/lib/api/client";
+import { ApiError, setApiSite, setCsrfToken, setUnauthenticatedHandler } from "@/lib/api/client";
 import { queries } from "@/lib/api/hooks";
 
 function Authenticated() {
@@ -25,7 +25,9 @@ export const Route = createFileRoute("/_authenticated")({
     try {
       const session = await context.queryClient.ensureQueryData(queries.session());
       setCsrfToken(session.csrf_token);
-      return { policyReadOnly: session.policy_read_only };
+      // A site chosen on a controller means nothing on a node at the same address.
+      if (session.role !== "controller") setApiSite(undefined);
+      return { policyReadOnly: session.policy_read_only, role: session.role };
     } catch (error) {
       if (error instanceof ApiError && error.status === 401) {
         const status = await context.queryClient.fetchQuery(queries.authStatus());

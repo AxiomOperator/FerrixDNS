@@ -105,6 +105,54 @@ load_balance = true
   answers.
 - All the servers need to give the same answers, or a name's answer will depend on which one was asked.
 
+## Blocked services
+
+**Blocked services** blocks well-known services by name, such as TikTok or Steam, with one switch. With no
+groups ticked, a service is blocked for everyone. Tick groups to block it only for them. The query log names the
+service as the reason.
+
+Each is a set of suffix block rules, so an allow rule for one name still makes an exception. They cover each
+service's main domains, but services change their domains and apps may keep using answers already cached.
+
+In a policy file:
+
+```toml
+[[blocked_services]]
+service = "tiktok"
+
+[[blocked_services]]
+service = "youtube"
+groups = ["kids"]
+```
+
+## Keeping answers working
+
+**Expired answers.** When upstreams can't answer, the node uses its last known answer, for up to a day after it
+expired, with a 30 second TTL so devices ask again soon (RFC 8767). Rules still apply to it. The query log shows
+these as **Expired answer**. Change how long they're kept with `cache_stale_seconds` under **Settings**, where 0
+turns this off.
+
+**Early refresh.** An answer asked for at least twice is renewed in the background during the last tenth of its
+life, so devices don't wait for upstream. Answers lasting under 20 seconds are left alone. Turn it off under
+**Settings**.
+
+**Cache** shows how often each has been used.
+
+## Finding out why
+
+**Diagnostics** shows how the node would answer a name right now, for a given device: whether the device may query,
+which rule or source decides, where the query goes, what's cached, and what each upstream server says when asked
+directly. It changes nothing and doesn't affect any counts. It also lists what devices really got, and if that's
+empty, devices may not be asking this node at all. **Diagnose this query** in the Query Explorer opens it filled in.
+
+**Upstreams** charts each server's response time and failures per minute over the last hour.
+
+## Exporting the query log
+
+**Export CSV** and **Export JSON** in the Query Explorer download what the current filters match, newest first, up to
+1,000,000 queries. Each export is recorded in the audit log. In a CSV, values a spreadsheet would run as formulas
+start with `'`, because query names come from anyone on the network.
+
 ## Query limits
 
 Each client address may send a limited number of queries per minute, 3,000 by default, and that's

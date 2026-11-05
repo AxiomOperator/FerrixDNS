@@ -1,0 +1,33 @@
+# The central controller: a dashboard, and what nodes connect out to. It serves no DNS.
+#
+#   sudo scripts/docker-deploy.sh --controller --address 10.0.0.2
+services:
+  ferrixdns-controller:
+    image: ferrixdns
+    container_name: ferrixdns-controller
+    build:
+      context: ../..
+      dockerfile: packaging/docker/Dockerfile
+    restart: unless-stopped
+    network_mode: host
+    read_only: true
+    # The binary carries a file capability, so it can't start with this dropped, though the
+    # controller never uses a low port.
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    command: ["controller"]
+    volumes:
+      - ferrixdns-controller-data:/data
+    healthcheck:
+      test: ["CMD", "/usr/bin/ferrixdns", "health", "--controller", "${FERRIXDNS_ADDRESS:-192.168.1.10}:${FERRIXDNS_CONTROLLER_PORT:-8444}"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+    environment:
+      FERRIXDNS_CONTROLLER_LISTEN: "${FERRIXDNS_ADDRESS:-192.168.1.10}:${FERRIXDNS_CONTROLLER_PORT:-8444}"
+      # What nodes use to reach this. Tokens carry it. Change it if nodes use a name or another address.
+      FERRIXDNS_PUBLIC_URL: "${FERRIXDNS_PUBLIC_URL:-https://${FERRIXDNS_ADDRESS:-192.168.1.10}:${FERRIXDNS_CONTROLLER_PORT:-8444}}"
+      FERRIXDNS_WEB_HOST: "${FERRIXDNS_ADDRESS:-192.168.1.10}"
+
+volumes:
+  ferrixdns-controller-data:

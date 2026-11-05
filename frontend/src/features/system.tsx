@@ -22,7 +22,22 @@ function Row({ label, children }: { label: string; children: ReactNode }) {
 }
 
 const ACTION_LABELS: Record<string, string> = {
-  "auth.setup": "Set up the node",
+  "auth.setup": "Set up the dashboard",
+  "service.block": "Blocked a service",
+  "service.unblock": "Unblocked a service",
+  "queries.export": "Exported the query log",
+  "site.create": "Added a site",
+  "site.update": "Changed a site",
+  "site.delete": "Removed a site",
+  "node.enroll": "A node joined",
+  "node.rename": "Renamed a node",
+  "node.remove": "Removed a node",
+  "enrollment_token.create": "Created a node token",
+  "enrollment_token.delete": "Cancelled a node token",
+  "deployment.create": "Started a deployment",
+  "deployment.promote": "Released a canary to all nodes",
+  "deployment.rollback": "Rolled back a deployment",
+  "deployment.node_problem": "A node couldn't apply a deployment",
   "auth.login_failed": "Failed sign-in",
   "auth.password_changed": "Changed password",
   "rule.create": "Added a rule",
@@ -200,10 +215,47 @@ function TimeCard({ ntp }: { ntp: Schemas["SystemStatus"]["ntp"] }) {
   );
 }
 
+/** Who changed what, newest first. */
+export function AuditCard({ description }: { description: string }) {
+  const audit = useQuery(queries.audit());
+  return (
+      <Card className="mt-4">
+        <CardHeader title="Recent changes" description={description} />
+        {audit.isPending && <Loading />}
+        {audit.isError && <ErrorState error={audit.error} onRetry={() => void audit.refetch()} />}
+        {audit.data && (
+          <TableWrap className="max-h-96 overflow-y-auto">
+            <Table>
+              <thead>
+                <tr>
+                  <Th>When</Th>
+                  <Th>Who</Th>
+                  <Th>What</Th>
+                  <Th>Target</Th>
+                </tr>
+              </thead>
+              <tbody>
+                {audit.data.map((event) => (
+                  <tr key={event.id}>
+                    <Td className="whitespace-nowrap text-text-secondary">{formatDateTime(event.occurred_at)}</Td>
+                    <Td>{event.actor}</Td>
+                    <Td>{ACTION_LABELS[event.action] ?? event.action}</Td>
+                    <Td className="max-w-64 truncate text-text-secondary" title={event.target}>
+                      {event.target}
+                    </Td>
+                  </tr>
+                ))}
+              </tbody>
+            </Table>
+          </TableWrap>
+        )}
+      </Card>
+  );
+}
+
 export function SystemPage({ readOnly }: { readOnly: boolean }) {
   const system = useQuery(queries.system());
   const revisions = useQuery(queries.revisions());
-  const audit = useQuery(queries.audit());
   const [restoring, setRestoring] = useState<string>();
   const activate = usePolicyMutation(
     (revision: string) => api.activateRevision(revision),
@@ -327,37 +379,7 @@ export function SystemPage({ readOnly }: { readOnly: boolean }) {
         )}
       </Card>
 
-      <Card className="mt-4">
-        <CardHeader title="Recent changes" description="Who changed what on this node." />
-        {audit.isPending && <Loading />}
-        {audit.isError && <ErrorState error={audit.error} onRetry={() => void audit.refetch()} />}
-        {audit.data && (
-          <TableWrap className="max-h-96 overflow-y-auto">
-            <Table>
-              <thead>
-                <tr>
-                  <Th>When</Th>
-                  <Th>Who</Th>
-                  <Th>What</Th>
-                  <Th>Target</Th>
-                </tr>
-              </thead>
-              <tbody>
-                {audit.data.map((event) => (
-                  <tr key={event.id}>
-                    <Td className="whitespace-nowrap text-text-secondary">{formatDateTime(event.occurred_at)}</Td>
-                    <Td>{event.actor}</Td>
-                    <Td>{ACTION_LABELS[event.action] ?? event.action}</Td>
-                    <Td className="max-w-64 truncate text-text-secondary" title={event.target}>
-                      {event.target}
-                    </Td>
-                  </tr>
-                ))}
-              </tbody>
-            </Table>
-          </TableWrap>
-        )}
-      </Card>
+      <AuditCard description="Who changed what on this node." />
 
       <ConfirmDialog
         open={restoring !== undefined}

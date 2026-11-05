@@ -205,6 +205,8 @@ const TAB_FIELDS = {
     "cache_mib",
     "cache_max_ttl",
     "cache_negative_ttl",
+    "cache_stale_seconds",
+    "cache_prefetch",
   ],
   dashboard: ["web_listen", "web_hosts", "web_tls_mode", "web_tls_cert", "web_tls_key", "web_insecure_remote"],
   system: ["ntp_listen", "policy_file", "state_dir", "log_filter", "allow_private_list_urls"],
@@ -459,6 +461,21 @@ export function DnsSettings({ form }: { form: NodeSettingsForm }) {
           <Field label='Longest time to keep "not found" (seconds)' htmlFor="node-cache-negative">
             {number("node-cache-negative", "cache_negative_ttl", 0)}
           </Field>
+          <Field
+            label="Keep expired answers for (seconds)"
+            htmlFor="node-cache-stale"
+            hint="Used only when upstreams can't answer. 0 turns this off."
+          >
+            {number("node-cache-stale", "cache_stale_seconds", 0)}
+          </Field>
+          <Wide>
+            <Toggle
+              label="Refresh popular answers early"
+              hint="Renews them just before they expire, so devices don't wait for upstream."
+              checked={values.cache_prefetch}
+              onChange={(cache_prefetch) => set({ cache_prefetch })}
+            />
+          </Wide>
         </div>
       </Card>
     </>

@@ -3,7 +3,7 @@
 //! Entries are upstream answers and never contain policy decisions, so changing policy needs no
 //! flush. The DNS path checks policy on every hit, including each CNAME target (ADR-003).
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use hickory_proto::op::{Message, ResponseCode};
@@ -13,6 +13,13 @@ use moka::sync::Cache;
 
 /// Bytes counted per entry beyond its wire size, for the key and bookkeeping.
 const ENTRY_OVERHEAD: u32 = 256;
+/// The TTL clients get on an expired answer, so they ask again soon (RFC 8767 section 4).
+pub const STALE_ANSWER_TTL: u32 = 30;
+/// Answers shorter-lived than this are deliberately short, so refreshing them early gains little.
+const MIN_PREFETCH_TTL: Duration = Duration::from_secs(20);
+/// An answer is refreshed in its last tenth of life, if it's been asked for at least this often.
+const PREFETCH_MIN_HITS: u32 = 2;
+const PREFETCH_REMAINING_DIVISOR: u32 = 10;
 
 /// Limits for the cache.
 #[derive(Clone, Copy, Debug)]
@@ -22,6 +29,10 @@ pub struct CacheConfig {
     pub max_ttl: Duration,
     /// Longest time to keep NXDOMAIN and empty answers.
     pub negative_ttl_cap: Duration,
+    /// How long an expired answer is kept, to use when upstreams can't answer. Zero turns this off.
+    pub stale_window: Duration,
+    /// Refreshes popular answers shortly before they expire.
+    pub prefetch: bool,
 }
 
 impl Default for CacheConfig {
@@ -30,6 +41,8 @@ impl Default for CacheConfig {
             max_bytes: 64 * 1024 * 1024,
             max_ttl: Duration::from_secs(86_400),
             negative_ttl_cap: Duration::from_secs(300),
+            stale_window: Duration::from_secs(86_400),
+            prefetch: true,
         }
     }
 }
@@ -55,9 +68,13 @@ struct Entry {
     stored_at: Instant,
     ttl: Duration,
     size: u32,
+    hits: AtomicU32,
+    refreshing: AtomicBool,
 }
 
-struct PerEntryTtl;
+struct PerEntryTtl {
+    stale_window: Duration,
+}
 
 impl Expiry<CacheKey, std::sync::Arc<Entry>> for PerEntryTtl {
     fn expire_after_create(
@@ -66,7 +83,7 @@ impl Expiry<CacheKey, std::sync::Arc<Entry>> for PerEntryTtl {
         value: &std::sync::Arc<Entry>,
         _created_at: Instant,
     ) -> Option<Duration> {
-        Some(value.ttl)
+        Some(value.ttl.saturating_add(self.stale_window))
     }
 }
 
@@ -76,6 +93,17 @@ pub struct CachedAnswer {
     pub message: Message,
     /// Whether this node validated the answer with DNSSEC when it was stored.
     pub validated: bool,
+    /// This caller should refresh the answer in the background. Only one caller is told to.
+    pub refresh_due: bool,
+}
+
+/// What the cache holds for a question, without counting as a lookup.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CacheState {
+    /// Seconds until it expires. Zero if it already has.
+    pub remaining_seconds: u64,
+    /// It has expired, and is only kept to use if upstreams can't answer.
+    pub stale: bool,
 }
 
 /// Counters and size, for reporting.
@@ -86,6 +114,10 @@ pub struct CacheStats {
     pub entries: u64,
     pub bytes: u64,
     pub max_bytes: u64,
+    /// Expired answers given out because upstreams couldn't answer.
+    pub stale_served: u64,
+    /// Answers refreshed before they expired.
+    pub prefetches: u64,
 }
 
 /// A bounded, thread-safe cache of upstream answers.
@@ -94,6 +126,8 @@ pub struct DnsCache {
     config: CacheConfig,
     hits: AtomicU64,
     misses: AtomicU64,
+    stale_served: AtomicU64,
+    prefetches: AtomicU64,
 }
 
 /// How long an answer may be cached, or `None` if it shouldn't be.
@@ -143,13 +177,17 @@ impl DnsCache {
         let entries = Cache::builder()
             .max_capacity(config.max_bytes)
             .weigher(|_key: &CacheKey, entry: &std::sync::Arc<Entry>| entry.size)
-            .expire_after(PerEntryTtl)
+            .expire_after(PerEntryTtl {
+                stale_window: config.stale_window,
+            })
             .build();
         Self {
             entries,
             config,
             hits: AtomicU64::new(0),
             misses: AtomicU64::new(0),
+            stale_served: AtomicU64::new(0),
+            prefetches: AtomicU64::new(0),
         }
     }
 
@@ -165,6 +203,7 @@ impl DnsCache {
             return None;
         }
         self.hits.fetch_add(1, Ordering::Relaxed);
+        let refresh_due = self.claim_refresh(&entry, elapsed);
 
         let elapsed_seconds = u32::try_from(elapsed.as_secs()).unwrap_or(u32::MAX);
         let mut message = entry.message.clone();
@@ -174,6 +213,57 @@ impl DnsCache {
         Some(CachedAnswer {
             message,
             validated: entry.validated,
+            refresh_due,
+        })
+    }
+
+    /// Whether a hit on an answer should refresh it. At most one hit per stored answer gets a yes.
+    fn claim_refresh(&self, entry: &Entry, elapsed: Duration) -> bool {
+        let hits = entry.hits.fetch_add(1, Ordering::Relaxed).saturating_add(1);
+        let remaining = entry.ttl.saturating_sub(elapsed);
+        let claimed = self.config.prefetch
+            && entry.ttl >= MIN_PREFETCH_TTL
+            && hits >= PREFETCH_MIN_HITS
+            && remaining <= entry.ttl / PREFETCH_REMAINING_DIVISOR
+            && !entry.refreshing.swap(true, Ordering::Relaxed);
+        if claimed {
+            self.prefetches.fetch_add(1, Ordering::Relaxed);
+        }
+        claimed
+    }
+
+    /// Reports on an entry, for diagnostics. This doesn't change any counts.
+    pub fn peek(&self, key: &CacheKey) -> Option<CacheState> {
+        let entry = self.entries.get(key)?;
+        let elapsed = entry.stored_at.elapsed();
+        Some(CacheState {
+            remaining_seconds: entry.ttl.saturating_sub(elapsed).as_secs(),
+            stale: elapsed >= entry.ttl,
+        })
+    }
+
+    /// An expired answer, for when upstreams can't give a fresh one (RFC 8767).
+    ///
+    /// DNSSEC signatures may have lapsed since this was validated, so it doesn't count as validated.
+    pub fn get_stale(&self, key: &CacheKey) -> Option<CachedAnswer> {
+        if self.config.stale_window.is_zero() {
+            return None;
+        }
+        let entry = self.entries.get(key)?;
+        self.stale_served.fetch_add(1, Ordering::Relaxed);
+        let mut message = entry.message.clone();
+        for record in message
+            .answers
+            .iter_mut()
+            .chain(&mut message.authorities)
+            .chain(&mut message.additionals)
+        {
+            record.ttl = STALE_ANSWER_TTL;
+        }
+        Some(CachedAnswer {
+            message,
+            validated: false,
+            refresh_due: false,
         })
     }
 
@@ -206,6 +296,8 @@ impl DnsCache {
                 stored_at: Instant::now(),
                 ttl,
                 size: wire_size.saturating_add(ENTRY_OVERHEAD),
+                hits: AtomicU32::new(0),
+                refreshing: AtomicBool::new(false),
             }),
         );
         true
@@ -225,6 +317,8 @@ impl DnsCache {
             entries: self.entries.entry_count(),
             bytes: self.entries.weighted_size(),
             max_bytes: self.config.max_bytes,
+            stale_served: self.stale_served.load(Ordering::Relaxed),
+            prefetches: self.prefetches.load(Ordering::Relaxed),
         }
     }
 }
@@ -438,6 +532,83 @@ mod tests {
         let stats = cache.stats();
         assert!(stats.bytes <= 64 * 1024, "{stats:?}");
         assert!(stats.entries > 0 && stats.entries < 1000, "{stats:?}");
+    }
+
+    #[test]
+    fn expired_answers_are_kept_for_the_stale_window() {
+        let cache = cache();
+        cache.insert(key("a.example"), &answer(1), true);
+        std::thread::sleep(Duration::from_millis(1050));
+        assert!(cache.get(&key("a.example")).is_none());
+        let stale = cache.get_stale(&key("a.example")).unwrap();
+        assert_eq!(stale.message.answers[0].ttl, STALE_ANSWER_TTL);
+        assert!(
+            !stale.validated,
+            "a stale answer isn't claimed as validated"
+        );
+        assert_eq!(cache.stats().stale_served, 1);
+    }
+
+    #[test]
+    fn nothing_stale_is_served_past_the_window_or_when_off() {
+        let off = DnsCache::new(CacheConfig {
+            stale_window: Duration::ZERO,
+            ..CacheConfig::default()
+        });
+        off.insert(key("a.example"), &answer(60), false);
+        assert!(off.get_stale(&key("a.example")).is_none());
+
+        let short = DnsCache::new(CacheConfig {
+            stale_window: Duration::from_millis(100),
+            ..CacheConfig::default()
+        });
+        short.insert(key("a.example"), &answer(1), false);
+        std::thread::sleep(Duration::from_millis(1200));
+        assert!(short.get_stale(&key("a.example")).is_none());
+    }
+
+    #[test]
+    fn popular_answers_near_expiry_are_refreshed_once() {
+        let cache = cache();
+        // A 20 second answer is due in its last 2 seconds, so age it past that.
+        let mut entry_message = answer(20);
+        entry_message.answers[0].ttl = 20;
+        cache.entries.insert(
+            key("a.example"),
+            std::sync::Arc::new(Entry {
+                message: entry_message,
+                validated: false,
+                stored_at: Instant::now() - Duration::from_secs(19),
+                ttl: Duration::from_secs(20),
+                size: 300,
+                hits: AtomicU32::new(0),
+                refreshing: AtomicBool::new(false),
+            }),
+        );
+        assert!(
+            !cache.get(&key("a.example")).unwrap().refresh_due,
+            "one hit isn't popular"
+        );
+        assert!(cache.get(&key("a.example")).unwrap().refresh_due);
+        assert!(
+            !cache.get(&key("a.example")).unwrap().refresh_due,
+            "only one caller refreshes"
+        );
+        assert_eq!(cache.stats().prefetches, 1);
+    }
+
+    #[test]
+    fn fresh_short_lived_or_disabled_answers_are_not_refreshed() {
+        let cache = cache();
+        cache.insert(key("fresh.example"), &answer(3600), false);
+        for _ in 0..5 {
+            assert!(!cache.get(&key("fresh.example")).unwrap().refresh_due);
+        }
+        cache.insert(key("short.example"), &answer(5), false);
+        for _ in 0..5 {
+            assert!(!cache.get(&key("short.example")).unwrap().refresh_due);
+        }
+        assert_eq!(cache.stats().prefetches, 0);
     }
 
     #[test]
